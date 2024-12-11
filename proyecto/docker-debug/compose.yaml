@@ -1,0 +1,19 @@
+services:
+  servidor:
+    build:
+      context: ../
+      dockerfile: docker-debug/servidor.dockerfile
+      tags: 
+        - "servidor"
+    networks:
+      - network-ra
+    deploy:
+      mode: replicated
+      endpoint_mode: vip
+      replicas: 5
+
+networks:
+  network-ra:
+    ipam:
+      config:
+        - subnet: "172.20.100.0/24"
