@@ -74,45 +74,76 @@ type AplicaOperacion struct {
 
 // Tipo de dato Go que representa un solo nodo (réplica) de raft
 type NodoRaft struct {
+
 	// Mutex para proteger acceso a estado compartido
 	Mux sync.Mutex
+
 	// Host:Port de todos los nodos (réplicas) Raft, en mismo orden
 	Nodos []rpctimeout.HostPort
+
 	// Utilización opcional de este logger para depuración
 	// Cada nodo Raft tiene su propio registro de trazas (logs)
 	Logger *log.Logger
 
 	// Se lee cuando se ha recibido un latido
 	Latido chan bool
+
 	// Timer que gestiona tiempo entre latidos, timeouts de candidatos
 	// y timeouts de seguidores
 	Timer *time.Timer
+
 	// indice de este nodo en campo array "nodos"
 	Yo int
+
 	// indice del nodo lider en campo array "nodos"
 	IdLider int
+
 	// Estados: StateFollower, StateCandidate y StateLeader
 	State string
 
+	// El valor de este canal se utiliza para devolver "Operacion confirmada"
+	// o "Fallo en consenso". Esto se envia al metodo someterOperacion despues
+	// de enviar la operacion a los nodos y esperar a que se comprometa.
+	Return chan string
+
+	CanalAplicar chan AplicaOperacion
+
 	/* STATE */
-	// En todos los servidores:
+
+	/****************************************************************
+	 En todos los servidores:
+	****************************************************************/
+
 	// El término actual, que identifica las épocas de elecciones
 	CurrentTerm int
+
 	// Guarda a quién votó el nodo en el término actual
 	VotedFor int
+
 	// Aquí se almacenan todas las entradas del log
 	LogEntries []Entry
-	// índice de la entrada de registro (log) más reciente que se ha "comprometido"
-	// (es decir, que ha sido confirmada como replicada en la mayoría de los nodos)
-	// y puede ser aplicada a la máquina de estados del sistema
+
+	// Este es un valor entero mantenido por todos los nodos (líder y seguidores)
+	// que indica el índice más alto del log que se ha comprometido.
 	CommitIndex int
-	// índice del registro (log) más reciente que se ha aplicado a la state machine
+
+	// Este valor indica el índice más alto del log que ha sido aplicado a la máquina de estados del nodo.
+	// LastApplied puede estar rezagado con respecto a CommitIndex, ya que los nodos aplican
+	//las entradas comprometidas de forma secuencial.
 	LastApplied int
 
-	// En el lider:
-	// Índice de la próxima entrada del log para enviar a cada nodo
+	/****************************************************************
+	  En el lider:
+	****************************************************************/
+
+	// Este es un array que el líder mantiene, donde NextIndex[i] representa
+	// el índice de la próxima entrada del registro (log) que el líder
+	// intentará enviar al nodo i (seguidor).
 	NextIndex []int
-	// Índice más alto del log replicado en cada nodo
+
+	// Este es otro array que el líder mantiene, donde MatchIndex[i] representa
+	// el índice más alto del log que el líder sabe que ha sido replicado
+	// correctamente en el nodo i.
 	MatchIndex []int
 }
 
@@ -217,70 +248,41 @@ func (nr *NodoRaft) obtenerEstado() (int, int, bool, int) {
 // El tercer valor es true si el nodo cree ser el lider
 // Cuarto valor es el lider, es el indice del líder si no es él
 func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, int, string) {
-	indice := -1
-	mandato := -1
-	esLider := nr.Yo == nr.IdLider
-	idLider := nr.IdLider
-	valorADevolver := ""
+	indice := -1                   // Índice de la operación en el registro
+	mandato := -1                  // Término actual del nodo
+	esLider := nr.Yo == nr.IdLider // Verifica si este nodo es el líder
+	idLider := nr.IdLider          // Identificador del nodo líder
+	valorADevolver := ""           // Resultado a devolver al cliente
 
+	// Si el nodo es el líder, debe procesar la operación
 	if esLider {
-		// Generar nueva entrada en el log
-		//¿Actualizar el registro de operaciones del lider, para la siguiente practica?
-		// De momento no existe tal registro.
-		indice = nr.CommitIndex
-		mandato = nr.CurrentTerm
-		// ¿El líder se cuenta a sí mismo?
-		confirmados := 1
-		// Argumentos de llamada RPC
+		indice = len(nr.LogEntries) // Determina el índice de la nueva entrada
+		mandato = nr.CurrentTerm    // Obtiene el término actual
+		// Crear la nueva entrada para el log
 		entry := Entry{
-			Term:      mandato,
-			Index:     indice, // De momento asumimos que es CommitIndex
-			Operation: operacion,
+			Term:      mandato,   // Término actual
+			Index:     indice,    // Índice de la nueva entrada
+			Operation: operacion, // Operación solicitada por el cliente
 		}
 
-		// Se incluye en el registro del lider la operacion solicitada por el cliente
+		nr.Mux.Lock()
+		// Agregar la entrada al registro del nodo
 		nr.LogEntries = append(nr.LogEntries, entry)
+		nr.Mux.Unlock()
 		nr.Logger.Printf("Nodo %d lider: Term=%d, Index=%d, Operacion=%s, Clave=%s, Valor=%s", nr.Yo,
 			entry.Term, entry.Index, entry.Operation.Operacion, entry.Operation.Clave, entry.Operation.Valor)
-		var reply Results
-		var args ArgAppendEntries
-		//args.PrevLogIndex ¿Practica 4?
-		//args.PrevLogIndex ¿Practica 4?
-		args.LeaderID = idLider
-		args.Term = mandato
-		args.Entries = entry
-		args.LeaderCommitIndex = indice
 
-		// Se somete la operación a todos los nodos
-		for i := 0; i < len(nr.Nodos); i++ {
-			if i == nr.Yo {
-				continue
-			}
-
-			// Realiza la llamada RPC para replicar la entrada en el nodo
-			err := nr.Nodos[i].CallTimeout("NodoRaft.AppendEntries", args, &reply, timeoutRpc)
-			// Verifica si no hubo errores en la llamada RPC
-			if err != nil {
-				nr.Logger.Printf("Error replicando entrada en nodo %d: %v", i, err)
-				continue
-			}
-			// Si la llamada fue exitosa, verifica que el nodo confirmó la entrada
-			if reply.Success {
-				nr.Logger.Printf("Nodo %d acepta la entrada (Term %d)", i, nr.CurrentTerm)
-				confirmados++
-			} else {
-				nr.Logger.Printf("Nodo %d rechaza la entrada (Term %d)", i, nr.CurrentTerm)
-			}
-
-		}
-		// Verificar si se confirma en la mayoría
-		if confirmados > len(nr.Nodos)/2 {
-			nr.CommitIndex++
-			valorADevolver = "Operacion confirmada"
-		} else {
-			valorADevolver = "Fallo en consenso"
-		}
+		// Espera la confirmación de la operación
+		valorADevolver = <-nr.Return
+	} else {
+		// Si no es el líder, devuelve un mensaje indicando que no puede procesar la operación
+		valorADevolver = "No es lider"
+		// Retorna el ID del líder actual para redirigir al cliente
+		idLider = nr.IdLider
 	}
+	//valorADevolver = "Operacion confirmada"
+	//valorADevolver = "Fallo en consenso"
+	//valorADevolver = "No es lider"
 	return indice, mandato, esLider, idLider, valorADevolver
 }
 
@@ -414,31 +416,121 @@ type Results struct {
 	Success bool
 }
 
+// Función auxiliar para calcular el mínimo entre dos valores
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (nr *NodoRaft) EnviarAppendEntries(indice int) {
+	if len(nr.LogEntries)-1 >= nr.NextIndex[indice] { // Si hay nuevas entradas en el log, se envían
+		/*entry := Entry{
+			Index:     nr.NextIndex[indice],
+			Term:      nr.LogEntries[nr.NextIndex[indice]].Mandato,
+			Operation: nr.LogEntries[nr.NextIndex[indice]].Operacion,
+		}*/
+
+		if nr.NextIndex[indice] > 0 {
+			// Hay una entrada previa válida en el log
+			//prevLogIndex := nr.NextIndex[indice] - 1
+			//prevLogTerm := nr.LogEntries[prevLogIndex].Mandato
+
+			/*go nr.nuevaEntrada(indice, &ArgAppendEntries{
+				Term:              nr.CurrentTerm,
+				LeaderID:          nr.Yo,
+				PrevLogIndex:      prevLogIndex,
+				PrevLogTerm:       prevLogTerm,
+				Entries:           entry,
+				LeaderCommitIndex: nr.CommitIndex,
+			}, &results)*/
+		} else {
+			// No hay entrada previa, se envía con índices iniciales
+			/*go nr.nuevaEntrada(i, &ArgAppendEntries{
+				Term:              nr.CurrentTerm,
+				LeaderID:          nr.Yo,
+				PrevLogIndex:      -1,
+				PrevLogTerm:       0,
+				Entries:           entry,
+				LeaderCommitIndex: nr.CommitIndex,
+			}, &results)*/
+		}
+	} else {
+		// En caso contrario, se envía un latido (heartbeat)
+		go nr.EnviarLatido(indice)
+	}
+}
+
 // Metodo de tratamiento de llamadas RPC AppendEntries
-func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries,
-	results *Results) error {
-	results.Success = true
-	if args.Entries.Operation.Operacion == "" { // Se ha recibido un latido
+func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) error {
+
+	// Caso 1: Se recibe un latido (sin nuevas entradas)
+	if args.Entries.Operation.Operacion == "" {
 		if args.Term < nr.CurrentTerm {
-			// El término del lider que ha mandado el latido es obsoleto, se rechaza
-			nr.Logger.Printf("Nodo %d rechaza el latido del nodo %d por termino menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
+			// El término del líder que envió el latido es obsoleto, se rechaza
+			nr.Logger.Printf("Nodo %d rechaza el latido del nodo %d por término menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
 			results.Success = false
 			results.Term = nr.CurrentTerm
 		} else {
-			// El término del lider es actual o mayor, se acepta
+			// Actualizar término y líder si el término es válido
 			nr.Mux.Lock()
 			nr.CurrentTerm = args.Term
 			nr.IdLider = args.LeaderID
 			nr.Mux.Unlock()
-			nr.Latido <- true
-			// Succes es true
+			results.Success = true
+			nr.Latido <- true // Notificar que se recibió un latido
 		}
-	} else { // Se ha recibido una entrada al registro (log)
-		nr.LogEntries = append(nr.LogEntries, args.Entries)
-		nr.Logger.Printf("Nodo %d follower: Term=%d, Index=%d, Operacion=%s, Clave=%s, Valor=%s", nr.Yo,
-			args.Entries.Term, args.Entries.Index, args.Entries.Operation.Operacion, args.Entries.Operation.Clave,
-			args.Entries.Operation.Valor)
+		return nil
 	}
+
+	// Caso 2: Se reciben nuevas entradas para replicar
+	//nr.Mux.Lock()
+	//defer nr.Mux.Unlock()
+
+	// Verificar si el término del líder es válido
+	if args.Term < nr.CurrentTerm {
+		results.Success = false
+		results.Term = nr.CurrentTerm
+		return nil
+	}
+
+	// Verificar si el log del seguidor coincide con el del líder en PrevLogIndex
+	if args.PrevLogIndex >= len(nr.LogEntries) || (args.PrevLogIndex >= 0 && nr.LogEntries[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		// La entrada previa no coincide, rechazar la solicitud
+		nr.Logger.Printf("Nodo %d rechaza AppendEntries por inconsistencia en PrevLogIndex o PrevLogTerm", nr.Yo)
+		results.Success = false
+		return nil
+	}
+
+	// Truncar el log si hay entradas conflictivas
+	if args.PrevLogIndex+1 < len(nr.LogEntries) {
+		nr.LogEntries = nr.LogEntries[:args.PrevLogIndex+1]
+		nr.Logger.Printf("Nodo %d truncó su log hasta el índice %d", nr.Yo, args.PrevLogIndex)
+	}
+
+	// Añadir las nuevas entradas al log
+	nr.LogEntries = append(nr.LogEntries, args.Entries)
+	nr.Logger.Printf("Nodo %d añadió nueva entrada: Term=%d, Index=%d, Operación=%s", nr.Yo,
+		args.Entries.Term, args.Entries.Index, args.Entries.Operation.Operacion)
+
+	// Actualizar el CommitIndex
+	if args.LeaderCommitIndex > nr.CommitIndex {
+		nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
+		nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d", nr.Yo, nr.CommitIndex)
+
+		// Aplicar entradas comprometidas a la máquina de estados
+		for nr.LastApplied < nr.CommitIndex {
+			nr.LastApplied++
+			// Aquí llamarías a la lógica para aplicar la operación a la máquina de estados
+			entry := nr.LogEntries[nr.LastApplied]
+			nr.Logger.Printf("Nodo %d aplicó entrada: Term=%d, Index=%d, Operación=%s", nr.Yo,
+				entry.Term, entry.Index, entry.Operation.Operacion)
+		}
+	}
+
+	results.Term = nr.CurrentTerm
+	results.Success = true
 	return nil
 }
 
@@ -486,7 +578,7 @@ func (nr *NodoRaft) enviarPeticionVoto(nodo int, args *ArgsPeticionVoto,
 
 // Pre: true
 // Post: Envia un latido a todos los nodos
-func (nr *NodoRaft) enviarLatido(indice int) {
+func (nr *NodoRaft) EnviarLatido(indice int) {
 	// Argumentos para la llamada RPC
 	var args ArgAppendEntries
 	var reply Results
@@ -598,7 +690,7 @@ func (nr *NodoRaft) GestionarLiderazgo() {
 				nr.Logger.Printf("Nodo %d envia latidos (Term %d)", nr.Yo, nr.CurrentTerm)
 				for i := 0; i < len(nr.Nodos); i++ {
 					if i != nr.Yo {
-						go nr.enviarLatido(i)
+						go nr.EnviarAppendEntries(i)
 					}
 				}
 				nr.reiniciarTimer(intervaloLatidos)
