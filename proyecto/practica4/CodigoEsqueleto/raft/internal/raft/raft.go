@@ -183,6 +183,16 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.AppendEntry = make(chan bool)
 	nr.State = StateFollower
 
+	// Inicializar CanalAplicar
+	nr.CanalAplicar = canalAplicarOperacion
+
+	// Inicializar Ram (base de datos simulada)
+	nr.Ram = make(map[string]string)
+
+	// Inicializar arrays NextIndex y MatchIndex con tamaño igual al número de nodos
+	nr.NextIndex = make([]int, len(nodos))
+	nr.MatchIndex = make([]int, len(nodos))
+
 	if kEnableDebugLogs {
 		nombreNodo := nodos[yo].Host() + "_" + nodos[yo].Port()
 		logPrefix := fmt.Sprintf("%s", nombreNodo)
@@ -379,13 +389,23 @@ func random(min, max time.Duration) time.Duration {
 func (nr *NodoRaft) PedirVoto(peticion *ArgsPeticionVoto,
 	reply *RespuestaPeticionVoto) error {
 
-	if peticion.LastLogIndex < nr.LogEntries[len(nr.LogEntries)-1].Index || peticion.LastLogTerm < nr.LogEntries[len(nr.LogEntries)-1].Term {
+	// Comprobar si el log está vacío antes de acceder al último índice o término
+	var lastLogIndex, lastLogTerm int
+	if len(nr.LogEntries) > 0 {
+		lastLogIndex = nr.LogEntries[len(nr.LogEntries)-1].Index
+		lastLogTerm = nr.LogEntries[len(nr.LogEntries)-1].Term
+	} else {
+		lastLogIndex = -1 // Valor inicial para un log vacío
+		lastLogTerm = 0
+	}
+
+	if peticion.LastLogIndex < lastLogIndex || peticion.LastLogTerm < lastLogTerm {
 		/*LastLogTerm o LastLogIndex del candidato es menor al nodo votante, se rechaza el voto*/
 		nr.Logger.Printf("Nodo %d rechaza voto por lastLogIndex o lastLogTerm menor al nodo %d (Term %d)", nr.Yo, peticion.CandidateID, nr.CurrentTerm)
 		reply.Granted = false
 		return nil
-
 	}
+
 	if peticion.Term < nr.CurrentTerm {
 		/*El término del candidato es menor al término del nodo votante, se rechaza el voto y se le informa
 		del término actual*/

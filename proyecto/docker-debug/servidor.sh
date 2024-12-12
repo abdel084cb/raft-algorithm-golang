@@ -11,7 +11,7 @@ if [[ -z "$IP" ]]; then
 fi
 
 # Cambiar a la ruta del programa
-if ! cd /proyecto/practica3/CodigoEsqueleto/raft/cmd/srvraft; then
+if ! cd /proyecto/practica4/CodigoEsqueleto/raft/cmd/srvraft; then
   echo "Error: No se pudo cambiar al directorio /proyecto/practica3/CodigoEsqueleto/raft/cmd/srvraft." >&2
   exit 1
 fi
