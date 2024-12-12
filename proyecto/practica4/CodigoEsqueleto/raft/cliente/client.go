@@ -1,4 +1,4 @@
-package cliente_debug
+package main
 
 import (
 	"fmt"
@@ -31,7 +31,7 @@ func generarOperacion() raft.TipoOperacion {
 }
 
 // Envia una operación al nodo Raft usando RPC con timeout.
-func enviarOperacion(node rpctimeout.HostPort, operacion raft.TipoOperacion) error {
+func enviarOperacion(node rpctimeout.HostPort, nodos []rpctimeout.HostPort, operacion raft.TipoOperacion) error {
 	var resultado raft.ResultadoRemoto
 	err := node.CallTimeout("NodoRaft.SometerOperacionRaft", operacion, &resultado, 2*time.Second)
 	if err != nil {
@@ -41,9 +41,14 @@ func enviarOperacion(node rpctimeout.HostPort, operacion raft.TipoOperacion) err
 	if resultado.EsLider {
 		fmt.Printf("Operación confirmada en líder %s: %+v\n", string(node), resultado)
 	} else {
-		fmt.Printf("Redirigiendo al líder %d.\n", resultado.IdLider)
+		// Validar que el IdLider es válido
+		if resultado.IdLider >= 0 && resultado.IdLider < len(nodos) {
+			fmt.Printf("Redirigiendo al líder: %s\n", nodos[resultado.IdLider])
+			return enviarOperacion(nodos[resultado.IdLider], nodos, operacion) // Redirigir al líder
+		} else {
+			fmt.Println("IdLider inválido, no se puede redirigir.")
+		}
 	}
-
 	return nil
 }
 
@@ -69,12 +74,12 @@ func main() {
 		fmt.Printf("Enviando operación: %+v al nodo %s\n", operacion, string(nodo))
 
 		// Enviar la operación al nodo seleccionado
-		err := enviarOperacion(nodo, operacion)
+		err := enviarOperacion(nodo, nodos, operacion)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		}
 
 		// Esperar un tiempo aleatorio antes de la siguiente solicitud
-		time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond)
+		time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
 	}
 }
