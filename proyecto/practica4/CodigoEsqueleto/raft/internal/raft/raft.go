@@ -85,8 +85,8 @@ type NodoRaft struct {
 	// Cada nodo Raft tiene su propio registro de trazas (logs)
 	Logger *log.Logger
 
-	// Se lee cuando se ha recibido un latido
-	Latido chan bool
+	// Se lee cuando se ha recibido un latido o una entrada de log
+	AppendEntry chan bool
 
 	// Timer que gestiona tiempo entre latidos, timeouts de candidatos
 	// y timeouts de seguidores
@@ -106,7 +106,12 @@ type NodoRaft struct {
 	// de enviar la operacion a los nodos y esperar a que se comprometa.
 	Return chan string
 
+	// Número de noods que han confirmado que han replicado la entrada
+	Confirmaciones int
+
 	CanalAplicar chan AplicaOperacion
+
+	Ram map[string]string
 
 	/* STATE */
 
@@ -175,7 +180,7 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.IdLider = -1
 	nr.CurrentTerm = 0
 	nr.VotedFor = -1
-	nr.Latido = make(chan bool)
+	nr.AppendEntry = make(chan bool)
 	nr.State = StateFollower
 
 	if kEnableDebugLogs {
@@ -272,6 +277,10 @@ func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, i
 		nr.Logger.Printf("Nodo %d lider: Term=%d, Index=%d, Operacion=%s, Clave=%s, Valor=%s", nr.Yo,
 			entry.Term, entry.Index, entry.Operation.Operacion, entry.Operation.Clave, entry.Operation.Valor)
 
+		nr.CanalAplicar <- AplicaOperacion{
+			Indice:    indice,
+			Operacion: entry.Operation,
+		}
 		// Espera la confirmación de la operación
 		valorADevolver = <-nr.Return
 	} else {
@@ -369,6 +378,14 @@ func random(min, max time.Duration) time.Duration {
 // Metodo para RPC PedirVoto
 func (nr *NodoRaft) PedirVoto(peticion *ArgsPeticionVoto,
 	reply *RespuestaPeticionVoto) error {
+
+	if peticion.LastLogIndex < nr.LogEntries[len(nr.LogEntries)-1].Index || peticion.LastLogTerm < nr.LogEntries[len(nr.LogEntries)-1].Term {
+		/*LastLogTerm o LastLogIndex del candidato es menor al nodo votante, se rechaza el voto*/
+		nr.Logger.Printf("Nodo %d rechaza voto por lastLogIndex o lastLogTerm menor al nodo %d (Term %d)", nr.Yo, peticion.CandidateID, nr.CurrentTerm)
+		reply.Granted = false
+		return nil
+
+	}
 	if peticion.Term < nr.CurrentTerm {
 		/*El término del candidato es menor al término del nodo votante, se rechaza el voto y se le informa
 		del término actual*/
@@ -416,50 +433,102 @@ type Results struct {
 	Success bool
 }
 
+// Envia entradas de log al nodo con indice indicado
+func (nr *NodoRaft) EnviarEntradas(indice int) {
+	nr.Logger.Printf("Nodo %d enviando entradas de log al nodo %d (Term %d)", nr.Yo, indice, nr.CurrentTerm)
+
+	// Verificar si hay nuevas entradas en el log para enviar
+	if len(nr.LogEntries)-1 >= nr.NextIndex[indice] {
+		// Si hay nuevas entradas en el log, se preparan para el envío
+		entry := Entry{
+			Index:     nr.NextIndex[indice],
+			Term:      nr.LogEntries[nr.NextIndex[indice]].Term,
+			Operation: nr.LogEntries[nr.NextIndex[indice]].Operation,
+		}
+
+		var prevLogIndex, prevLogTerm int
+		if nr.NextIndex[indice] > 0 {
+			// Si hay una entrada previa válida en el log
+			prevLogIndex = nr.NextIndex[indice] - 1
+			prevLogTerm = nr.LogEntries[prevLogIndex].Term
+		} else {
+			// Si no hay una entrada previa (primera entrada en el log)
+			prevLogIndex = -1
+			prevLogTerm = 0
+		}
+
+		// Preparar los argumentos para AppendEntries
+		args := &ArgAppendEntries{
+			Term:              nr.CurrentTerm,
+			LeaderID:          nr.Yo,
+			PrevLogIndex:      prevLogIndex,
+			PrevLogTerm:       prevLogTerm,
+			Entries:           entry,
+			LeaderCommitIndex: nr.CommitIndex,
+		}
+
+		// Ejecutar la llamada RPC
+		var results Results
+		nr.Logger.Printf("Nodo %d enviando AppendEntries al nodo %d: PrevLogIndex=%d, PrevLogTerm=%d, EntryIndex=%d",
+			nr.Yo, indice, prevLogIndex, prevLogTerm, entry.Index)
+
+		err := nr.Nodos[indice].CallTimeout("NodoRaft.AppendEntries", args, &results, 20*time.Millisecond)
+
+		if err != nil {
+			// Si ocurre un error en la comunicación
+			nr.Logger.Printf("Nodo %d no pudo enviar AppendEntries al nodo %d: %v", nr.Yo, indice, err)
+			return
+		}
+
+		if results.Success {
+			// Si el log del seguidor es consistente, actualizar MatchIndex y NextIndex
+			nr.Mux.Lock()
+			nr.MatchIndex[indice] = nr.NextIndex[indice]
+			nr.NextIndex[indice]++
+			nr.Logger.Printf("Nodo %d actualizó MatchIndex[%d]=%d y NextIndex[%d]=%d (Term %d)",
+				nr.Yo, indice, nr.MatchIndex[indice], indice, nr.NextIndex[indice], nr.CurrentTerm)
+
+			if nr.MatchIndex[indice] > nr.CommitIndex {
+				// Comprobar si hay mayoría para consolidar la entrada
+				nr.Confirmaciones++
+				nr.Logger.Printf("Nodo %d NumRespuestas incrementado a %d (Term %d)", nr.Yo, nr.Confirmaciones, nr.CurrentTerm)
+
+				if nr.Confirmaciones > len(nr.Nodos)/2 {
+					nr.CommitIndex++
+					nr.Confirmaciones = 0 // Reiniciar contador de respuestas
+					nr.Return <- "Operacion confirmada"
+					nr.Logger.Printf("Nodo %d consolidó entrada en CommitIndex=%d (Term %d)", nr.Yo, nr.CommitIndex, nr.CurrentTerm)
+				}
+			}
+			nr.Mux.Unlock()
+		} else {
+			// Si el log del seguidor no es consistente, decrementar NextIndex para reintentar
+			nr.NextIndex[indice]--
+			nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
+				nr.Yo, indice, nr.NextIndex[indice], indice, nr.CurrentTerm)
+		}
+	} else {
+		nr.Logger.Printf("Nodo %d no tiene nuevas entradas para enviar al nodo %d (Term %d)", nr.Yo, indice, nr.CurrentTerm)
+	}
+}
+
+// Decide si enviar entradas de log o simplemente un latido
+func (nr *NodoRaft) EnviarAppendEntries(indice int) {
+	if len(nr.LogEntries)-1 >= nr.NextIndex[indice] {
+		// Si hay nuevas entradas en el log, se envían
+		go nr.EnviarEntradas(indice)
+	} else {
+		// En caso contrario, se envía un latido (heartbeat)
+		go nr.EnviarLatido(indice)
+	}
+}
+
 // Función auxiliar para calcular el mínimo entre dos valores
 func min(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
-}
-
-func (nr *NodoRaft) EnviarAppendEntries(indice int) {
-	if len(nr.LogEntries)-1 >= nr.NextIndex[indice] { // Si hay nuevas entradas en el log, se envían
-		/*entry := Entry{
-			Index:     nr.NextIndex[indice],
-			Term:      nr.LogEntries[nr.NextIndex[indice]].Mandato,
-			Operation: nr.LogEntries[nr.NextIndex[indice]].Operacion,
-		}*/
-
-		if nr.NextIndex[indice] > 0 {
-			// Hay una entrada previa válida en el log
-			//prevLogIndex := nr.NextIndex[indice] - 1
-			//prevLogTerm := nr.LogEntries[prevLogIndex].Mandato
-
-			/*go nr.nuevaEntrada(indice, &ArgAppendEntries{
-				Term:              nr.CurrentTerm,
-				LeaderID:          nr.Yo,
-				PrevLogIndex:      prevLogIndex,
-				PrevLogTerm:       prevLogTerm,
-				Entries:           entry,
-				LeaderCommitIndex: nr.CommitIndex,
-			}, &results)*/
-		} else {
-			// No hay entrada previa, se envía con índices iniciales
-			/*go nr.nuevaEntrada(i, &ArgAppendEntries{
-				Term:              nr.CurrentTerm,
-				LeaderID:          nr.Yo,
-				PrevLogIndex:      -1,
-				PrevLogTerm:       0,
-				Entries:           entry,
-				LeaderCommitIndex: nr.CommitIndex,
-			}, &results)*/
-		}
-	} else {
-		// En caso contrario, se envía un latido (heartbeat)
-		go nr.EnviarLatido(indice)
-	}
 }
 
 // Metodo de tratamiento de llamadas RPC AppendEntries
@@ -479,14 +548,12 @@ func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) erro
 			nr.IdLider = args.LeaderID
 			nr.Mux.Unlock()
 			results.Success = true
-			nr.Latido <- true // Notificar que se recibió un latido
+			nr.AppendEntry <- true // Notificar que se recibió un latido
 		}
 		return nil
 	}
 
 	// Caso 2: Se reciben nuevas entradas para replicar
-	//nr.Mux.Lock()
-	//defer nr.Mux.Unlock()
 
 	// Verificar si el término del líder es válido
 	if args.Term < nr.CurrentTerm {
@@ -522,7 +589,10 @@ func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) erro
 		// Aplicar entradas comprometidas a la máquina de estados
 		for nr.LastApplied < nr.CommitIndex {
 			nr.LastApplied++
-			// Aquí llamarías a la lógica para aplicar la operación a la máquina de estados
+			nr.CanalAplicar <- AplicaOperacion{
+				Indice:    nr.LastApplied,                          // El índice de la operación
+				Operacion: nr.LogEntries[nr.LastApplied].Operation, // La operación específica
+			}
 			entry := nr.LogEntries[nr.LastApplied]
 			nr.Logger.Printf("Nodo %d aplicó entrada: Term=%d, Index=%d, Operación=%s", nr.Yo,
 				entry.Term, entry.Index, entry.Operation.Operacion)
@@ -531,6 +601,7 @@ func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) erro
 
 	results.Term = nr.CurrentTerm
 	results.Success = true
+	nr.AppendEntry <- true // Notificar que se recibió una entrada de log
 	return nil
 }
 
@@ -576,8 +647,7 @@ func (nr *NodoRaft) enviarPeticionVoto(nodo int, args *ArgsPeticionVoto,
 	return err == nil
 }
 
-// Pre: true
-// Post: Envia un latido a todos los nodos
+// Post: Envia un latido al nodo con el indice indicado
 func (nr *NodoRaft) EnviarLatido(indice int) {
 	// Argumentos para la llamada RPC
 	var args ArgAppendEntries
@@ -600,6 +670,7 @@ func (nr *NodoRaft) EnviarLatido(indice int) {
 	}
 }
 
+// El nodo raft pasa a tener el estado "nuevoEstado"
 func (nr *NodoRaft) cambiarEstado(nuevoEstado string) {
 	nr.Mux.Lock()
 	nr.Logger.Printf("Nodo %d cambia estado de %s a %s (Term %d)", nr.Yo, nr.State, nuevoEstado, nr.CurrentTerm)
@@ -632,31 +703,51 @@ func (nr *NodoRaft) reiniciarTimer(duracion time.Duration) {
 	}
 }
 
-// Detiene y limpia el temporizador
-func (nr *NodoRaft) detenerTimer() {
-	nr.Mux.Lock()
-	defer nr.Mux.Unlock()
-	if nr.Timer != nil {
-		if !nr.Timer.Stop() {
-			select {
-			case <-nr.Timer.C:
-			default:
+func (nr *NodoRaft) AplicarOperacionesInf() {
+	for {
+		select {
+		case op, ok := <-nr.CanalAplicar:
+			if !ok {
+				// El canal se ha cerrado, salir del bucle
+				nr.Logger.Printf("CanalAplicar cerrado, finalizando procesamiento de operaciones.")
+				return
 			}
+
+			nr.Mux.Lock() // Aseguramos acceso concurrente seguro a la RAM
+			switch op.Operacion.Operacion {
+			case "escribir":
+				// Escribir en la RAM clave-valor
+				nr.Ram[op.Operacion.Clave] = op.Operacion.Valor
+				nr.Logger.Printf("Escribiendo en RAM: Clave=%s, Valor=%s", op.Operacion.Clave, op.Operacion.Valor)
+
+			case "leer":
+				// Leer de la RAM clave-valor
+				valor, existe := nr.Ram[op.Operacion.Clave]
+				if existe {
+					nr.Logger.Printf("Leyendo de RAM: Clave=%s, Valor=%s", op.Operacion.Clave, valor)
+				} else {
+					nr.Logger.Printf("Clave no encontrada en RAM: Clave=%s", op.Operacion.Clave)
+				}
+
+			default:
+				// Operación desconocida
+				nr.Logger.Printf("Operación desconocida: %s", op.Operacion.Operacion)
+			}
+			nr.Mux.Unlock() // Liberamos el mutex una vez procesada la operación
 		}
-		nr.Timer = nil
 	}
 }
 
 // Lógica base de raft
 func (nr *NodoRaft) GestionarLiderazgo() {
 	nr.inicializarTimerAleatorio()
-
+	go nr.AplicarOperacionesInf()
 	for {
 		select {
-		case <-nr.Latido:
+		case <-nr.AppendEntry:
 			switch nr.State {
 			case StateFollower:
-				nr.Logger.Printf("Nodo %d recibe latido (Term %d)", nr.Yo, nr.CurrentTerm)
+				nr.Logger.Printf("Nodo %d recibe latido o entrada de log (Term %d)", nr.Yo, nr.CurrentTerm)
 				nr.reiniciarTimer(random(timeoutMin, timeoutMax))
 			case StateCandidate:
 				nr.Logger.Printf("Nodo %d pierde candidatura, pasa a ser follower (Term %d)", nr.Yo, nr.CurrentTerm)
@@ -687,7 +778,7 @@ func (nr *NodoRaft) GestionarLiderazgo() {
 				nr.Mux.Unlock()
 				go nr.empezarEleccion()
 			case StateLeader:
-				nr.Logger.Printf("Nodo %d envia latidos (Term %d)", nr.Yo, nr.CurrentTerm)
+				nr.Logger.Printf("Nodo %d envia AppendEntrie (Term %d)", nr.Yo, nr.CurrentTerm)
 				for i := 0; i < len(nr.Nodos); i++ {
 					if i != nr.Yo {
 						go nr.EnviarAppendEntries(i)
@@ -715,10 +806,23 @@ func (nr *NodoRaft) empezarEleccion() {
 	eleccionGanada := make(chan bool, 1)
 	mayoriaNecesaria := len(nr.Nodos)/2 + 1
 
+	var lastLogIndex, lastLogTerm int
+	if len(nr.LogEntries) > 0 {
+		// Si el log no está vacío, obtener los valores del último elemento
+		lastLogIndex = nr.LogEntries[len(nr.LogEntries)-1].Index
+		lastLogTerm = nr.LogEntries[len(nr.LogEntries)-1].Term
+	} else {
+		// Si el log está vacío, inicializar los valores como 0
+		lastLogIndex = -1
+		lastLogTerm = 0
+	}
+
 	// Argumentos para las solicitudes de votos
 	args := ArgsPeticionVoto{
-		Term:        nr.CurrentTerm,
-		CandidateID: nr.Yo,
+		Term:         nr.CurrentTerm,
+		CandidateID:  nr.Yo,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
 	}
 
 	// Enviar solicitudes de voto a los demás nodos
