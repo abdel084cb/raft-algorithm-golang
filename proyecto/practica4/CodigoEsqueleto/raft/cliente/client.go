@@ -33,13 +33,17 @@ func generarOperacion() raft.TipoOperacion {
 // Envia una operación al nodo Raft usando RPC con timeout.
 func enviarOperacion(node rpctimeout.HostPort, nodos []rpctimeout.HostPort, operacion raft.TipoOperacion) error {
 	var resultado raft.ResultadoRemoto
-	err := node.CallTimeout("NodoRaft.SometerOperacionRaft", operacion, &resultado, 3000*time.Millisecond)
+	err := node.CallTimeout("NodoRaft.SometerOperacionRaft", operacion, &resultado, 6000*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("error al enviar operación: %v", err)
 	}
 
 	if resultado.EsLider {
-		fmt.Printf("Operación confirmada en líder %s: %+v\n", string(node), resultado)
+		if resultado.ValorADevolver == "Operacion confirmada" {
+			fmt.Printf("Se ha confirmado la operacion")
+		} else {
+			fmt.Printf("Operación fallida: %s\n", resultado.ValorADevolver)
+		}
 	} else {
 		// Validar que el IdLider es válido
 		if resultado.IdLider >= 0 && resultado.IdLider < len(nodos) {

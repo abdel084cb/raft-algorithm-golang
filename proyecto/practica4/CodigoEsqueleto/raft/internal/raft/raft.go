@@ -181,6 +181,8 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.CurrentTerm = 0
 	nr.VotedFor = -1
 	nr.Confirmaciones = 0
+	nr.CommitIndex = -1
+	nr.LastApplied = -1
 	nr.AppendEntry = make(chan bool)
 	nr.State = StateFollower
 	nr.LogEntries = []Entry{}
