@@ -283,14 +283,9 @@ func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, i
 		nr.Mux.Lock()
 		// Agregar la entrada al registro del nodo
 		nr.LogEntries = append(nr.LogEntries, entry)
-		nr.Mux.Unlock()
-		nr.Logger.Printf("Nodo %d lider: Term=%d, Index=%d, Operacion=%s, Clave=%s, Valor=%s", nr.Yo,
+		nr.Logger.Printf("Nodo %d lider append log: Term=%d, Index=%d, Operacion=%s, Clave=%s, Valor=%s", nr.Yo,
 			entry.Term, entry.Index, entry.Operation.Operacion, entry.Operation.Clave, entry.Operation.Valor)
-
-		nr.CanalAplicar <- AplicaOperacion{
-			Indice:    indice,
-			Operacion: entry.Operation,
-		}
+		nr.Mux.Unlock()
 		// Espera la confirmación de la operación
 		valorADevolver = <-nr.Return
 	} else {
@@ -299,9 +294,6 @@ func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, i
 		// Retorna el ID del líder actual para redirigir al cliente
 		idLider = nr.IdLider
 	}
-	//valorADevolver = "Operacion confirmada"
-	//valorADevolver = "Fallo en consenso"
-	//valorADevolver = "No es lider"
 	return indice, mandato, esLider, idLider, valorADevolver
 }
 
@@ -455,87 +447,92 @@ type Results struct {
 
 // Envia entradas de log al nodo con indice indicado
 func (nr *NodoRaft) EnviarEntradas(indice int) {
-	nr.Logger.Printf("Nodo %d enviando entradas de log al nodo %d (Term %d)", nr.Yo, indice, nr.CurrentTerm)
 
-	// Verificar si hay nuevas entradas en el log para enviar
-	if len(nr.LogEntries)-1 >= nr.NextIndex[indice] {
-		// Si hay nuevas entradas en el log, se preparan para el envío
-		entry := Entry{
-			Index:     nr.NextIndex[indice],
-			Term:      nr.LogEntries[nr.NextIndex[indice]].Term,
-			Operation: nr.LogEntries[nr.NextIndex[indice]].Operation,
-		}
+	// Si hay nuevas entradas en el log, se preparan para el envío
+	entry := Entry{
+		Index:     nr.NextIndex[indice],
+		Term:      nr.LogEntries[nr.NextIndex[indice]].Term,
+		Operation: nr.LogEntries[nr.NextIndex[indice]].Operation,
+	}
 
-		var prevLogIndex, prevLogTerm int
-		if nr.NextIndex[indice] > 0 {
-			// Si hay una entrada previa válida en el log
-			prevLogIndex = nr.NextIndex[indice] - 1
-			prevLogTerm = nr.LogEntries[prevLogIndex].Term
-		} else {
-			// Si no hay una entrada previa (primera entrada en el log)
-			prevLogIndex = -1
-			prevLogTerm = 0
-		}
+	var prevLogIndex, prevLogTerm int
+	if nr.NextIndex[indice] > 0 {
+		// Si hay una entrada previa válida en el log
+		prevLogIndex = nr.NextIndex[indice] - 1
+		prevLogTerm = nr.LogEntries[prevLogIndex].Term
+	} else {
+		// Si no hay una entrada previa (primera entrada en el log)
+		prevLogIndex = -1
+		prevLogTerm = 0
+	}
 
-		// Preparar los argumentos para AppendEntries
-		args := &ArgAppendEntries{
-			Term:              nr.CurrentTerm,
-			LeaderID:          nr.Yo,
-			PrevLogIndex:      prevLogIndex,
-			PrevLogTerm:       prevLogTerm,
-			Entries:           entry,
-			LeaderCommitIndex: nr.CommitIndex,
-		}
+	// Preparar los argumentos para AppendEntries
+	args := &ArgAppendEntries{
+		Term:              nr.CurrentTerm,
+		LeaderID:          nr.Yo,
+		PrevLogIndex:      prevLogIndex,
+		PrevLogTerm:       prevLogTerm,
+		Entries:           entry,
+		LeaderCommitIndex: nr.CommitIndex,
+	}
 
-		// Ejecutar la llamada RPC
-		var results Results
-		nr.Logger.Printf("Nodo %d enviando AppendEntries al nodo %d: PrevLogIndex=%d, PrevLogTerm=%d, EntryIndex=%d",
-			nr.Yo, indice, prevLogIndex, prevLogTerm, entry.Index)
+	// Ejecutar la llamada RPC
+	var results Results
+	nr.Logger.Printf("Nodo %d lider enviando AppendEntries al nodo %d: PrevLogIndex=%d, PrevLogTerm=%d, EntryIndex=%d",
+		nr.Yo, indice, prevLogIndex, prevLogTerm, entry.Index)
 
-		err := nr.Nodos[indice].CallTimeout("NodoRaft.AppendEntries", args, &results, timeoutRpc)
+	err := nr.Nodos[indice].CallTimeout("NodoRaft.AppendEntries", args, &results, timeoutRpc)
 
-		if err != nil {
-			// Si ocurre un error en la comunicación
-			nr.Logger.Printf("Nodo %d no pudo enviar AppendEntries al nodo %d: %v", nr.Yo, indice, err)
-			return
-		}
+	if err != nil {
+		// Si ocurre un error en la comunicación
+		nr.Logger.Printf("Nodo %d lider no pudo enviar AppendEntries al nodo %d: %v", nr.Yo, indice, err)
+		return
+	}
 
-		if results.Success {
-			// Si el log del seguidor es consistente, actualizar MatchIndex y NextIndex
+	if results.Success {
+		// Si el log del seguidor es consistente, actualizar MatchIndex y NextIndex
+		nr.Mux.Lock()
+		nr.MatchIndex[indice] = nr.NextIndex[indice]
+		nr.NextIndex[indice]++
+		nr.Logger.Printf("Nodo %d lider actualizó MatchIndex[%d]=%d y NextIndex[%d]=%d (Term %d)",
+			nr.Yo, indice, nr.MatchIndex[indice], indice, nr.NextIndex[indice], nr.CurrentTerm)
+		nr.Mux.Unlock()
+
+		if nr.MatchIndex[indice] > nr.CommitIndex {
+			// Comprobar si hay mayoría para consolidar la entrada
 			nr.Mux.Lock()
-			nr.MatchIndex[indice] = nr.NextIndex[indice]
-			nr.NextIndex[indice]++
+			nr.Confirmaciones++
 			nr.Mux.Unlock()
-			nr.Logger.Printf("Nodo %d actualizó MatchIndex[%d]=%d y NextIndex[%d]=%d (Term %d)",
-				nr.Yo, indice, nr.MatchIndex[indice], indice, nr.NextIndex[indice], nr.CurrentTerm)
+			nr.Logger.Printf("Nodo %d lider: Confirmaciones incrementadas a %d (Term %d)", nr.Yo, nr.Confirmaciones, nr.CurrentTerm)
 
-			if nr.MatchIndex[indice] > nr.CommitIndex {
-				// Comprobar si hay mayoría para consolidar la entrada
+			if nr.Confirmaciones > len(nr.Nodos)/2 {
 				nr.Mux.Lock()
-				nr.Confirmaciones++
+				nr.CommitIndex++
+				nr.Confirmaciones = 0 // Reiniciar contador de respuestas
 				nr.Mux.Unlock()
-				nr.Logger.Printf("Nodo %d NumRespuestas incrementado a %d (Term %d)", nr.Yo, nr.Confirmaciones, nr.CurrentTerm)
-
-				if nr.Confirmaciones > len(nr.Nodos)/2 {
-					nr.Mux.Lock()
-					nr.CommitIndex++
-					nr.Confirmaciones = 0 // Reiniciar contador de respuestas
-					nr.Mux.Unlock()
-					nr.Return <- "Operacion confirmada"
-					nr.Logger.Printf("Nodo %d consolidó entrada en CommitIndex=%d (Term %d)", nr.Yo, nr.CommitIndex, nr.CurrentTerm)
+				nr.Return <- "Operacion confirmada"
+				nr.Logger.Printf("Nodo %d lider consolidó entrada en CommitIndex=%d (Term %d)", nr.Yo, nr.CommitIndex, nr.CurrentTerm)
+				// Aplicar entradas comprometidas a la máquina de estados
+				for nr.LastApplied < nr.CommitIndex {
+					nr.LastApplied++
+					nr.CanalAplicar <- AplicaOperacion{
+						Indice:    nr.LastApplied,                          // El índice de la operación
+						Operacion: nr.LogEntries[nr.LastApplied].Operation, // La operación específica
+					}
+					entry := nr.LogEntries[nr.LastApplied]
+					nr.Logger.Printf("Nodo %d lider aplicó entrada: Term=%d, Index=%d, Operación=%s", nr.Yo,
+						entry.Term, entry.Index, entry.Operation.Operacion)
 				}
 			}
-
-		} else {
-			// Si el log del seguidor no es consistente, decrementar NextIndex para reintentar
-			nr.Mux.Lock()
-			nr.NextIndex[indice]--
-			nr.Mux.Unlock()
-			nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
-				nr.Yo, indice, nr.NextIndex[indice], indice, nr.CurrentTerm)
 		}
+
 	} else {
-		nr.Logger.Printf("Nodo %d no tiene nuevas entradas para enviar al nodo %d (Term %d)", nr.Yo, indice, nr.CurrentTerm)
+		// Si el log del seguidor no es consistente, decrementar NextIndex para reintentar
+		nr.Mux.Lock()
+		nr.NextIndex[indice]--
+		nr.Mux.Unlock()
+		nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
+			nr.Yo, indice, nr.NextIndex[indice], indice, nr.CurrentTerm)
 	}
 }
 
@@ -730,36 +727,27 @@ func (nr *NodoRaft) reiniciarTimer(duracion time.Duration) {
 	}
 }
 
+// Funcion que se encarga de aplicar las operaciones a la máquina de estados
 func (nr *NodoRaft) AplicarOperacionesInf() {
-	for {
-		select {
-		case op, ok := <-nr.CanalAplicar:
-			if !ok {
-				// El canal se ha cerrado, salir del bucle
-				nr.Logger.Printf("Nodo %d: CanalAplicar cerrado, finalizando procesamiento de operaciones.", nr.Yo)
-				return
+	for op := range nr.CanalAplicar {
+		nr.Mux.Lock()
+		switch op.Operacion.Operacion {
+		case "escribir":
+			nr.Ram[op.Operacion.Clave] = op.Operacion.Valor
+			nr.Logger.Printf("Nodo %d: Escribiendo en RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, op.Operacion.Valor)
+
+		case "leer":
+			valor, existe := nr.Ram[op.Operacion.Clave]
+			if existe {
+				nr.Logger.Printf("Nodo %d: Leyendo de RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, valor)
+			} else {
+				nr.Logger.Printf("Nodo %d: Clave no encontrada en RAM: Clave=%s", nr.Yo, op.Operacion.Clave)
 			}
 
-			nr.Mux.Lock() // Bloquear acceso compartido a la RAM
-			// Procesar la operación
-			switch op.Operacion.Operacion {
-			case "escribir":
-				nr.Ram[op.Operacion.Clave] = op.Operacion.Valor
-				nr.Logger.Printf("Nodo %d: Escribiendo en RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, op.Operacion.Valor)
-
-			case "leer":
-				valor, existe := nr.Ram[op.Operacion.Clave]
-				if existe {
-					nr.Logger.Printf("Nodo %d: Leyendo de RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, valor)
-				} else {
-					nr.Logger.Printf("Nodo %d: Clave no encontrada en RAM: Clave=%s", nr.Yo, op.Operacion.Clave)
-				}
-
-			default:
-				nr.Logger.Printf("Nodo %d: Operación desconocida: %s", nr.Yo, op.Operacion.Operacion)
-			}
-			nr.Mux.Unlock() // Desbloquear después de procesar la operación
+		default:
+			nr.Logger.Printf("Nodo %d: Operación desconocida: %s", nr.Yo, op.Operacion.Operacion)
 		}
+		nr.Mux.Unlock()
 	}
 }
 
@@ -803,7 +791,6 @@ func (nr *NodoRaft) GestionarLiderazgo() {
 				nr.Mux.Unlock()
 				go nr.empezarEleccion()
 			case StateLeader:
-				nr.Logger.Printf("Nodo %d envia AppendEntrie (Term %d)", nr.Yo, nr.CurrentTerm)
 				for i := 0; i < len(nr.Nodos); i++ {
 					if i != nr.Yo {
 						go nr.EnviarAppendEntries(i)
