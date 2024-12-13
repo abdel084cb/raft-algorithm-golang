@@ -33,7 +33,7 @@ func generarOperacion() raft.TipoOperacion {
 // Envia una operación al nodo Raft usando RPC con timeout.
 func enviarOperacion(node rpctimeout.HostPort, nodos []rpctimeout.HostPort, operacion raft.TipoOperacion) error {
 	var resultado raft.ResultadoRemoto
-	err := node.CallTimeout("NodoRaft.SometerOperacionRaft", operacion, &resultado, 6000*time.Millisecond)
+	err := node.CallTimeout("NodoRaft.SometerOperacionRaft", operacion, &resultado, 2000*time.Millisecond)
 	if err != nil {
 		return fmt.Errorf("error al enviar operación: %v", err)
 	}

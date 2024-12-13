@@ -176,22 +176,19 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	canalAplicarOperacion chan AplicaOperacion) *NodoRaft {
 	nr := &NodoRaft{}
 	nr.Nodos = nodos
+	nr.AppendEntry = make(chan bool)
 	nr.Yo = yo
 	nr.IdLider = -1
+	nr.State = StateFollower
+	nr.Return = make(chan string)
+	nr.Confirmaciones = 0
+	nr.CanalAplicar = canalAplicarOperacion
+	nr.Ram = make(map[string]string)
 	nr.CurrentTerm = 0
 	nr.VotedFor = -1
-	nr.Confirmaciones = 0
+	nr.LogEntries = []Entry{}
 	nr.CommitIndex = -1
 	nr.LastApplied = -1
-	nr.AppendEntry = make(chan bool)
-	nr.State = StateFollower
-	nr.LogEntries = []Entry{}
-	nr.Return = make(chan string)
-	// Inicializar CanalAplicar
-	nr.CanalAplicar = canalAplicarOperacion
-	// Inicializar Ram (base de datos simulada)
-	nr.Ram = make(map[string]string)
-	// Inicializar arrays NextIndex y MatchIndex con tamaño igual al número de nodos
 	nr.NextIndex = make([]int, len(nodos))
 	nr.MatchIndex = make([]int, len(nodos))
 
@@ -572,13 +569,29 @@ func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) erro
 			nr.Mux.Lock()
 			nr.CurrentTerm = args.Term
 			nr.IdLider = args.LeaderID
+			// Verificar si LeaderCommitIndex indica nuevos compromisos
+			if args.LeaderCommitIndex > nr.CommitIndex {
+				nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
+				nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d por latido", nr.Yo, nr.CommitIndex)
+
+				// Aplicar entradas comprometidas a la máquina de estados
+				for nr.LastApplied < nr.CommitIndex {
+					nr.LastApplied++
+					nr.CanalAplicar <- AplicaOperacion{
+						Indice:    nr.LastApplied,
+						Operacion: nr.LogEntries[nr.LastApplied].Operation,
+					}
+					entry := nr.LogEntries[nr.LastApplied]
+					nr.Logger.Printf("Nodo %d aplicó entrada: Term=%d, Index=%d, Operación=%s", nr.Yo,
+						entry.Term, entry.Index, entry.Operation.Operacion)
+				}
+			}
 			nr.Mux.Unlock()
 			results.Success = true
 			nr.AppendEntry <- true // Notificar que se recibió un latido
 		}
 		return nil
 	}
-
 	// Caso 2: Se reciben nuevas entradas para replicar
 
 	// Verificar si el término del líder es válido
@@ -673,21 +686,53 @@ func (nr *NodoRaft) enviarPeticionVoto(nodo int, args *ArgsPeticionVoto,
 	return err == nil
 }
 
-// Post: Envia un latido al nodo con el indice indicado
 func (nr *NodoRaft) EnviarLatido(indice int) {
-	// Argumentos para la llamada RPC
-	var args ArgAppendEntries
-	var reply Results
-	args.Term = nr.CurrentTerm
-	args.LeaderID = nr.Yo
-	args.Entries.Operation.Operacion = ""
-	nr.Logger.Printf("Nodo %d envia latido al nodo %d (Term %d)", nr.Yo, indice, nr.CurrentTerm)
-	err := nr.Nodos[indice].CallTimeout("NodoRaft.AppendEntries", args, &reply, timeoutRpc)
-	if err != nil {
-		nr.Logger.Printf("Nodo %d no ha enviado el latido correctamente (Term %d)", nr.Yo, nr.CurrentTerm)
+	// Validar índices antes de acceder al log
+	var prevLogIndex, prevLogTerm int
+	var entry Entry
+
+	if len(nr.LogEntries) > 0 && nr.NextIndex[indice] < len(nr.LogEntries) {
+		prevLogIndex = nr.NextIndex[indice] - 1
+		if prevLogIndex >= 0 {
+			prevLogTerm = nr.LogEntries[prevLogIndex].Term
+		} else {
+			prevLogTerm = 0
+		}
+		entry = Entry{
+			Index:     nr.NextIndex[indice],
+			Term:      nr.LogEntries[nr.NextIndex[indice]].Term,
+			Operation: TipoOperacion{Operacion: ""}, // Latido vacío
+		}
+	} else {
+		prevLogIndex = -1
+		prevLogTerm = 0
+		entry = Entry{
+			Index:     prevLogIndex,
+			Term:      prevLogTerm,
+			Operation: TipoOperacion{Operacion: ""}, // Latido vacío
+		}
 	}
-	if reply.Term > args.Term {
-		nr.Logger.Printf("Nodo %d ha descubierto que es lider con termino obsoleto (Term %d)", nr.Yo, nr.CurrentTerm)
+
+	args := &ArgAppendEntries{
+		Term:              nr.CurrentTerm,
+		LeaderID:          nr.Yo,
+		PrevLogIndex:      prevLogIndex,
+		PrevLogTerm:       prevLogTerm,
+		Entries:           entry,
+		LeaderCommitIndex: nr.CommitIndex,
+	}
+
+	nr.Logger.Printf("Nodo %d envia latido al nodo %d (Term %d)", nr.Yo, indice, nr.CurrentTerm)
+	var reply Results
+	err := nr.Nodos[indice].CallTimeout("NodoRaft.AppendEntries", args, &reply, timeoutRpc)
+
+	if err != nil {
+		nr.Logger.Printf("Nodo %d fallo al enviar latido al nodo %d: %v", nr.Yo, indice, err)
+		return
+	}
+
+	if reply.Term > nr.CurrentTerm {
+		nr.Logger.Printf("Nodo %d detecta un término mayor y cambia a seguidor (Term %d)", nr.Yo, reply.Term)
 		nr.Mux.Lock()
 		nr.CurrentTerm = reply.Term
 		nr.Mux.Unlock()
