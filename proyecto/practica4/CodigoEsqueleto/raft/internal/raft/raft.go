@@ -180,15 +180,15 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.IdLider = -1
 	nr.CurrentTerm = 0
 	nr.VotedFor = -1
+	nr.Confirmaciones = 0
 	nr.AppendEntry = make(chan bool)
 	nr.State = StateFollower
-
+	nr.LogEntries = []Entry{}
+	nr.Return = make(chan string)
 	// Inicializar CanalAplicar
 	nr.CanalAplicar = canalAplicarOperacion
-
 	// Inicializar Ram (base de datos simulada)
 	nr.Ram = make(map[string]string)
-
 	// Inicializar arrays NextIndex y MatchIndex con tamaño igual al número de nodos
 	nr.NextIndex = make([]int, len(nodos))
 	nr.MatchIndex = make([]int, len(nodos))
@@ -492,7 +492,7 @@ func (nr *NodoRaft) EnviarEntradas(indice int) {
 		nr.Logger.Printf("Nodo %d enviando AppendEntries al nodo %d: PrevLogIndex=%d, PrevLogTerm=%d, EntryIndex=%d",
 			nr.Yo, indice, prevLogIndex, prevLogTerm, entry.Index)
 
-		err := nr.Nodos[indice].CallTimeout("NodoRaft.AppendEntries", args, &results, 20*time.Millisecond)
+		err := nr.Nodos[indice].CallTimeout("NodoRaft.AppendEntries", args, &results, timeoutRpc)
 
 		if err != nil {
 			// Si ocurre un error en la comunicación
@@ -505,25 +505,32 @@ func (nr *NodoRaft) EnviarEntradas(indice int) {
 			nr.Mux.Lock()
 			nr.MatchIndex[indice] = nr.NextIndex[indice]
 			nr.NextIndex[indice]++
+			nr.Mux.Unlock()
 			nr.Logger.Printf("Nodo %d actualizó MatchIndex[%d]=%d y NextIndex[%d]=%d (Term %d)",
 				nr.Yo, indice, nr.MatchIndex[indice], indice, nr.NextIndex[indice], nr.CurrentTerm)
 
 			if nr.MatchIndex[indice] > nr.CommitIndex {
 				// Comprobar si hay mayoría para consolidar la entrada
+				nr.Mux.Lock()
 				nr.Confirmaciones++
+				nr.Mux.Unlock()
 				nr.Logger.Printf("Nodo %d NumRespuestas incrementado a %d (Term %d)", nr.Yo, nr.Confirmaciones, nr.CurrentTerm)
 
 				if nr.Confirmaciones > len(nr.Nodos)/2 {
+					nr.Mux.Lock()
 					nr.CommitIndex++
 					nr.Confirmaciones = 0 // Reiniciar contador de respuestas
+					nr.Mux.Unlock()
 					nr.Return <- "Operacion confirmada"
 					nr.Logger.Printf("Nodo %d consolidó entrada en CommitIndex=%d (Term %d)", nr.Yo, nr.CommitIndex, nr.CurrentTerm)
 				}
 			}
-			nr.Mux.Unlock()
+
 		} else {
 			// Si el log del seguidor no es consistente, decrementar NextIndex para reintentar
+			nr.Mux.Lock()
 			nr.NextIndex[indice]--
+			nr.Mux.Unlock()
 			nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
 				nr.Yo, indice, nr.NextIndex[indice], indice, nr.CurrentTerm)
 		}
@@ -729,31 +736,29 @@ func (nr *NodoRaft) AplicarOperacionesInf() {
 		case op, ok := <-nr.CanalAplicar:
 			if !ok {
 				// El canal se ha cerrado, salir del bucle
-				nr.Logger.Printf("CanalAplicar cerrado, finalizando procesamiento de operaciones.")
+				nr.Logger.Printf("Nodo %d: CanalAplicar cerrado, finalizando procesamiento de operaciones.", nr.Yo)
 				return
 			}
 
-			nr.Mux.Lock() // Aseguramos acceso concurrente seguro a la RAM
+			nr.Mux.Lock() // Bloquear acceso compartido a la RAM
+			// Procesar la operación
 			switch op.Operacion.Operacion {
 			case "escribir":
-				// Escribir en la RAM clave-valor
 				nr.Ram[op.Operacion.Clave] = op.Operacion.Valor
-				nr.Logger.Printf("Escribiendo en RAM: Clave=%s, Valor=%s", op.Operacion.Clave, op.Operacion.Valor)
+				nr.Logger.Printf("Nodo %d: Escribiendo en RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, op.Operacion.Valor)
 
 			case "leer":
-				// Leer de la RAM clave-valor
 				valor, existe := nr.Ram[op.Operacion.Clave]
 				if existe {
-					nr.Logger.Printf("Leyendo de RAM: Clave=%s, Valor=%s", op.Operacion.Clave, valor)
+					nr.Logger.Printf("Nodo %d: Leyendo de RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, valor)
 				} else {
-					nr.Logger.Printf("Clave no encontrada en RAM: Clave=%s", op.Operacion.Clave)
+					nr.Logger.Printf("Nodo %d: Clave no encontrada en RAM: Clave=%s", nr.Yo, op.Operacion.Clave)
 				}
 
 			default:
-				// Operación desconocida
-				nr.Logger.Printf("Operación desconocida: %s", op.Operacion.Operacion)
+				nr.Logger.Printf("Nodo %d: Operación desconocida: %s", nr.Yo, op.Operacion.Operacion)
 			}
-			nr.Mux.Unlock() // Liberamos el mutex una vez procesada la operación
+			nr.Mux.Unlock() // Desbloquear después de procesar la operación
 		}
 	}
 }
