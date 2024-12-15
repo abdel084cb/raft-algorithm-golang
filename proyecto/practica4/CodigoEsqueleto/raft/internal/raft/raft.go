@@ -525,24 +525,14 @@ func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 			nr.Confirmaciones++
 			nr.Mux.Unlock()
 
-			if nr.Confirmaciones > len(nr.Nodos)/2 {
+			if nr.Confirmaciones >= len(nr.Nodos)/2 {
 				nr.Mux.Lock()
 				nr.CommitIndex++
 				nr.Confirmaciones = 0 // Reiniciar contador de respuestas
 				nr.Mux.Unlock()
 				nr.Return <- "Operacion confirmada"
 				nr.Logger.Printf("Nodo %d lider consolidó entrada en CommitIndex=%d (Term %d)", nr.Yo, nr.CommitIndex, nr.CurrentTerm)
-				// Aplicar entradas comprometidas a la máquina de estados
-				for nr.LastApplied < nr.CommitIndex {
-					nr.LastApplied++
-					nr.CanalAplicar <- AplicaOperacion{
-						Indice:    nr.LastApplied,                          // El índice de la operación
-						Operacion: nr.LogEntries[nr.LastApplied].Operation, // La operación específica
-					}
-					entry := nr.LogEntries[nr.LastApplied]
-					nr.Logger.Printf("Nodo %d lider aplicó entrada en máquina de estados: Term=%d, Index=%d, Operación=%s", nr.Yo,
-						entry.Term, entry.Index, entry.Operation.Operacion)
-				}
+				go nr.aplicarOperaciones()
 			}
 		}
 
@@ -555,9 +545,6 @@ func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 		nr.Mux.Unlock()
 		nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
 			nr.Yo, indice, nr.NextIndex[indice], indice, nr.CurrentTerm)
-		if nr.NextIndex[indice] > 0 {
-			go nr.EnviarEntradasLog(indice)
-		}
 	}
 }
 
@@ -602,77 +589,58 @@ func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) erro
 			if args.LeaderCommitIndex > nr.CommitIndex {
 				nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
 				nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d por latido", nr.Yo, nr.CommitIndex)
-
-				// Aplicar entradas comprometidas a la máquina de estados
-				for nr.LastApplied < nr.CommitIndex {
-					nr.LastApplied++
-					nr.CanalAplicar <- AplicaOperacion{
-						Indice:    nr.LastApplied,
-						Operacion: nr.LogEntries[nr.LastApplied].Operation,
-					}
-					entry := nr.LogEntries[nr.LastApplied]
-					nr.Logger.Printf("Nodo %d aplicó entrada en máquina de estados: Term=%d, Index=%d, Operación=%s", nr.Yo,
-						entry.Term, entry.Index, entry.Operation.Operacion)
-				}
 			}
 			nr.Mux.Unlock()
 			results.Success = true
+			results.Term = nr.CurrentTerm
 			nr.AppendEntry <- true // Notificar que se recibió un latido
 		}
 		return nil
-	}
-	// Caso 2: Se reciben nuevas entradas para replicar
-	nr.Logger.Printf("Nodo %d recibe entrada de log del nodo %d (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
+	} else {
+		// Caso 2: Se reciben nuevas entradas para replicar
+		nr.Logger.Printf("Nodo %d recibe entrada de log del nodo %d (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
 
-	// Verificar si el término del líder es válido
-	if args.Term < nr.CurrentTerm {
-		nr.Logger.Printf("Nodo %d rechaza entrada de log del nodo %d por término menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
-		results.Success = false
-		results.Term = nr.CurrentTerm
-		return nil
-	}
-
-	// Verificar si el log del seguidor coincide con el del líder en PrevLogIndex
-	if args.PrevLogIndex >= len(nr.LogEntries) || (args.PrevLogIndex >= 0 && nr.LogEntries[args.PrevLogIndex].Term != args.PrevLogTerm) {
-		// La entrada previa no coincide, rechazar la solicitud
-		nr.Logger.Printf("Nodo %d rechaza entrada de log por inconsistencia en PrevLogIndex o PrevLogTerm", nr.Yo)
-		results.Success = false
-		return nil
-	}
-
-	// Truncar el log si hay entradas conflictivas
-	if args.PrevLogIndex+1 < len(nr.LogEntries) {
-		nr.LogEntries = nr.LogEntries[:args.PrevLogIndex+1]
-		nr.Logger.Printf("Nodo %d truncó su log hasta el índice %d", nr.Yo, args.PrevLogIndex)
-	}
-
-	// Añadir las nuevas entradas al log
-	nr.LogEntries = append(nr.LogEntries, args.Entries)
-	nr.Logger.Printf("Nodo %d aplicó nueva entrada al log: Term=%d, Index=%d, Operación=%s", nr.Yo,
-		args.Entries.Term, args.Entries.Index, args.Entries.Operation.Operacion)
-
-	// Actualizar el CommitIndex
-	if args.LeaderCommitIndex > nr.CommitIndex {
-		nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
-		nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d", nr.Yo, nr.CommitIndex)
-
-		// Aplicar entradas comprometidas a la máquina de estados
-		for nr.LastApplied < nr.CommitIndex {
-			nr.LastApplied++
-			nr.CanalAplicar <- AplicaOperacion{
-				Indice:    nr.LastApplied,                          // El índice de la operación
-				Operacion: nr.LogEntries[nr.LastApplied].Operation, // La operación específica
-			}
-			entry := nr.LogEntries[nr.LastApplied]
-			nr.Logger.Printf("Nodo %d aplicó entrada al log: Term=%d, Index=%d, Operación=%s", nr.Yo,
-				entry.Term, entry.Index, entry.Operation.Operacion)
+		// Verificar si el término del líder es válido
+		if args.Term < nr.CurrentTerm {
+			nr.Logger.Printf("Nodo %d rechaza entrada de log del nodo %d por término menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
+			results.Success = false
+			results.Term = nr.CurrentTerm
+			return nil
 		}
-	}
+		nr.Mux.Lock()
+		nr.CurrentTerm = args.Term
+		nr.Mux.Unlock()
 
-	results.Term = nr.CurrentTerm
-	results.Success = true
-	nr.AppendEntry <- true // Notificar que se recibió una entrada de log
-	return nil
+		// Verificar si el log del seguidor coincide con el del líder en PrevLogIndex
+		if args.PrevLogIndex >= len(nr.LogEntries) || (args.PrevLogIndex >= 0 && nr.LogEntries[args.PrevLogIndex].Term != args.PrevLogTerm) {
+			// La entrada previa no coincide, rechazar la solicitud
+			nr.Logger.Printf("Nodo %d rechaza entrada de log por inconsistencia en PrevLogIndex o PrevLogTerm", nr.Yo)
+			results.Success = false
+			return nil
+		}
+
+		// Truncar el log si hay entradas conflictivas
+		if args.PrevLogIndex+1 < len(nr.LogEntries) {
+			nr.LogEntries = nr.LogEntries[:args.PrevLogIndex+1]
+			nr.Logger.Printf("Nodo %d truncó su log hasta el índice %d", nr.Yo, args.PrevLogIndex)
+		}
+
+		// Añadir las nuevas entradas al log
+		nr.LogEntries = append(nr.LogEntries, args.Entries)
+		nr.Logger.Printf("Nodo %d aplicó nueva entrada al log: Term=%d, Index=%d, Operación=%s", nr.Yo,
+			args.Entries.Term, args.Entries.Index, args.Entries.Operation.Operacion)
+
+		// Actualizar el CommitIndex
+		if args.LeaderCommitIndex > nr.CommitIndex {
+			nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
+			nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d", nr.Yo, nr.CommitIndex)
+		}
+
+		results.Term = nr.CurrentTerm
+		results.Success = true
+		nr.AppendEntry <- true // Notificar que se recibió una entrada de log
+		return nil
+	}
 }
 
 // ----- Metodos/Funciones a utilizar como clientes
@@ -830,6 +798,20 @@ func (nr *NodoRaft) AplicarOperacionesInf() {
 	}
 }
 
+// Método auxiliar para aplicar operaciones comprometidas a la máquina de estados
+func (nr *NodoRaft) aplicarOperaciones() {
+	for nr.LastApplied < nr.CommitIndex {
+		nr.LastApplied++
+		nr.CanalAplicar <- AplicaOperacion{
+			Indice:    nr.LastApplied,                          // El índice de la operación
+			Operacion: nr.LogEntries[nr.LastApplied].Operation, // La operación específica
+		}
+		entry := nr.LogEntries[nr.LastApplied]
+		nr.Logger.Printf("Nodo %d aplicó entrada en máquina de estados: Term=%d, Index=%d, Operación=%s", nr.Yo,
+			entry.Term, entry.Index, entry.Operation.Operacion)
+	}
+}
+
 // Lógica base de raft
 func (nr *NodoRaft) GestionarLiderazgo() {
 	nr.inicializarTimerAleatorio()
@@ -839,6 +821,7 @@ func (nr *NodoRaft) GestionarLiderazgo() {
 		case <-nr.AppendEntry:
 			switch nr.State {
 			case StateFollower:
+				go nr.aplicarOperaciones()
 				nr.reiniciarTimer(random(timeoutMin, timeoutMax))
 			case StateCandidate:
 				nr.Logger.Printf("Nodo %d pierde candidatura, pasa a ser follower (Term %d)", nr.Yo, nr.CurrentTerm)
