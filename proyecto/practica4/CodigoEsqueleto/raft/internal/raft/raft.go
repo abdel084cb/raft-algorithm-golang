@@ -543,8 +543,9 @@ func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 			nr.NextIndex[indice]--
 		}
 		nr.Mux.Unlock()
-		nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
-			nr.Yo, indice, nr.NextIndex[indice], indice, nr.CurrentTerm)
+		nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d y MatchIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
+			nr.Yo, indice, nr.NextIndex[indice], indice, nr.MatchIndex[indice], indice, nr.CurrentTerm)
+		go nr.EnviarEntradasLog(indice)
 	}
 }
 
@@ -639,8 +640,8 @@ func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) erro
 		results.Term = nr.CurrentTerm
 		results.Success = true
 		nr.AppendEntry <- true // Notificar que se recibió una entrada de log
-		return nil
 	}
+	return nil
 }
 
 // ----- Metodos/Funciones a utilizar como clientes
@@ -954,6 +955,13 @@ func (nr *NodoRaft) empezarEleccion() {
 		nr.Mux.Lock()
 		nr.IdLider = nr.Yo
 		nr.Mux.Unlock()
+		// Inicialización de los valores de NextIndex y MatchIndex al elegirse un nuevo líder
+		for i := 0; i < len(nr.Nodos); i++ {
+			if i != nr.Yo { // Evitar inicializar para sí mismo
+				nr.NextIndex[i] = len(nr.LogEntries) // El próximo índice a enviar es el siguiente al último en el log
+				nr.MatchIndex[i] = -1                // No hay entradas replicadas en este seguidor aún
+			}
+		}
 		nr.reiniciarTimer(intervaloLatidos)
 		nr.cambiarEstado(StateLeader)
 	}
