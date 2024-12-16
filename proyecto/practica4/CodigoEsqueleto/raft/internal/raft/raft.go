@@ -129,6 +129,8 @@ type NodoRaft struct {
 
 	Ram map[string]string
 
+	conectado []bool
+
 	/* STATE */
 
 	/****************************************************************
@@ -207,6 +209,7 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.LastApplied = -1
 	nr.NextIndex = make([]int, len(nodos))
 	nr.MatchIndex = make([]int, len(nodos))
+	nr.conectado = make([]bool, len(nodos))
 
 	if kEnableDebugLogs {
 		nombreNodo := nodos[yo].Host() + "_" + nodos[yo].Port()
@@ -327,6 +330,10 @@ type EstadoParcial struct {
 	Mandato int
 	EsLider bool
 	IdLider int
+}
+type EstadoLog struct {
+	Indice  int
+	Mandato int
 }
 
 type EstadoRemoto struct {
@@ -466,6 +473,22 @@ type Results struct {
 	Success bool
 }
 
+// LLamada RPC para obtener el estado del registro del nodo actual
+func (nr *NodoRaft) ObtenerEstadoLog(args Vacio, reply *EstadoLog) error {
+	nr.Mux.Lock()
+	defer nr.Mux.Unlock()
+
+	if len(nr.LogEntries) > 0 {
+		reply.Indice = nr.CommitIndex
+		reply.Mandato = nr.CurrentTerm
+		return nil
+	}
+
+	reply.Indice = 0
+	reply.Mandato = 0
+	return nil
+}
+
 // Envia entradas de log al nodo con indice indicado
 func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 
@@ -530,7 +553,6 @@ func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 				nr.CommitIndex++
 				nr.Confirmaciones = 0 // Reiniciar contador de respuestas
 				nr.Mux.Unlock()
-				nr.Return <- "Operacion confirmada"
 				nr.Logger.Printf("Nodo %d lider consolidó entrada en CommitIndex=%d (Term %d)", nr.Yo, nr.CommitIndex, nr.CurrentTerm)
 				go nr.aplicarOperaciones()
 			}
@@ -545,18 +567,22 @@ func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 		nr.Mux.Unlock()
 		nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d y MatchIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
 			nr.Yo, indice, nr.NextIndex[indice], indice, nr.MatchIndex[indice], indice, nr.CurrentTerm)
-		go nr.EnviarEntradasLog(indice)
+		nr.conectado[indice] = true
+		nr.EnviarEntradasLog(indice)
+		nr.conectado[indice] = false
 	}
 }
 
 // Decide si enviar entradas de log o simplemente un latido
 func (nr *NodoRaft) EnviarAppendEntries(indice int) {
-	if len(nr.LogEntries)-1 >= nr.NextIndex[indice] {
-		// Si hay nuevas entradas en el log, se envían
-		go nr.EnviarEntradasLog(indice)
-	} else {
-		// En caso contrario, se envía un latido (heartbeat)
-		go nr.EnviarLatido(indice)
+	if !nr.conectado[indice] {
+		if len(nr.LogEntries)-1 >= nr.NextIndex[indice] {
+			// Si hay nuevas entradas en el log, se envían
+			go nr.EnviarEntradasLog(indice)
+		} else {
+			// En caso contrario, se envía un latido (heartbeat)
+			go nr.EnviarLatido(indice)
+		}
 	}
 }
 
@@ -783,13 +809,21 @@ func (nr *NodoRaft) AplicarOperacionesInf() {
 		case "escribir":
 			nr.Ram[op.Operacion.Clave] = op.Operacion.Valor
 			nr.Logger.Printf("Nodo %d: Escribiendo en RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, op.Operacion.Valor)
-
+			if nr.Yo == nr.IdLider {
+				nr.Return <- "Se ha escrito en RAM"
+			}
 		case "leer":
 			valor, existe := nr.Ram[op.Operacion.Clave]
 			if existe {
 				nr.Logger.Printf("Nodo %d: Leyendo de RAM: Clave=%s, Valor=%s", nr.Yo, op.Operacion.Clave, valor)
+				if nr.Yo == nr.IdLider {
+					nr.Return <- valor
+				}
 			} else {
 				nr.Logger.Printf("Nodo %d: Clave no encontrada en RAM: Clave=%s", nr.Yo, op.Operacion.Clave)
+				if nr.Yo == nr.IdLider {
+					nr.Return <- "Clave no encontrada en RAM"
+				}
 			}
 
 		default:

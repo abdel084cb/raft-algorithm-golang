@@ -39,11 +39,7 @@ func enviarOperacion(node rpctimeout.HostPort, nodos []rpctimeout.HostPort, oper
 	}
 
 	if resultado.EsLider {
-		if resultado.ValorADevolver == "Operacion confirmada" {
-			fmt.Printf("Se ha confirmado la operacion")
-		} else {
-			fmt.Printf("Operación fallida: %s\n", resultado.ValorADevolver)
-		}
+		fmt.Printf(resultado.ValorADevolver + "\n")
 	} else {
 		// Validar que el IdLider es válido
 		if resultado.IdLider >= 0 && resultado.IdLider < len(nodos) {
