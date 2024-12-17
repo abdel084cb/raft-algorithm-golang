@@ -89,7 +89,7 @@ func (cfg *configDespliegue) tresOperacionesComprometidasEstable() {
 
 	// Someter las operaciones una por una y comprobar los resultados
 	time.Sleep(1 * time.Second)
-	if res := cfg.someterOperacion(lider, 0, raft.TipoOperacion{Operacion: "escribir", Clave: "1", Valor: "a"}, 1, ""); res != 0 {
+	if res := cfg.someterOperacion(lider, 0, raft.TipoOperacion{Operacion: "escribir", Clave: "1", Valor: "a"}, 1, "Se ha escrito en RAM"); res != 0 {
 		fmt.Println("Error en la operación 1")
 		fmt.Println(".............", "tresOperacionesComprometidasEstable", "No superado")
 		return
@@ -404,6 +404,7 @@ func (cfg *configDespliegue) SometerConcurrentementeOperaciones() {
 // Comprobar que hay un solo lider
 // probar varias veces si se necesitan reelecciones
 func (cfg *configDespliegue) pruebaUnLider(numreplicas int) int {
+	time.Sleep(10000 * time.Millisecond)
 	for iters := 0; iters < 10; iters++ {
 		time.Sleep(1000 * time.Millisecond)
 		mapaLideres := make(map[int][]int)
@@ -453,18 +454,18 @@ func (cfg *configDespliegue) obtenerEstadoRemoto(
 	var reply raft.EstadoRemoto
 	err := cfg.nodosRaft[indiceNodo].CallTimeout("NodoRaft.ObtenerEstadoNodo",
 		raft.Vacio{}, &reply, 10000*time.Millisecond)
-	check.CheckError(err, "Error en llamada RPC ObtenerEstadoRemoto")
+	check.CheckError(err, "Error en llamada RPC ObtenerEstadoNodo")
 
 	return reply.IdNodo, reply.Mandato, reply.EsLider, reply.IdLider
 }
 
 func (cfg *configDespliegue) obtenerEstadoRemotoLog(
 	indiceNodo int) (int, int) {
-	var reply raft.EstadoLog
+	var reply raft.EstadoEntradas
 	err := cfg.nodosRaft[indiceNodo].CallTimeout("NodoRaft.ObtenerEstadoNodoLog",
 		raft.Vacio{}, &reply, 5000*time.Millisecond)
 	check.CheckError(err, "Error en llamada RPC ObtenerEstadoRemotoLog")
-	return reply.Indice, reply.Mandato
+	return reply.IndiceReplicado, reply.Mandato
 }
 
 // start  gestor de vistas; mapa de replicas y maquinas donde ubicarlos;
@@ -527,16 +528,16 @@ func (cfg *configDespliegue) someterOperacion(lider int, numOperacion int, opera
 func (cfg *configDespliegue) comprobarUltimoIndiceComprometido(indiceEsperado int) int {
 	for i, endPoint := range cfg.nodosRaft {
 		if cfg.conectados[i] {
-			var reply int
+			var reply raft.EstadoEntradas
 			// Llamar al método remoto para obtener el último índice comprometido
-			err := endPoint.CallTimeout("NodoRaft.ObtenerIndiceComprometidoRaft",
+			err := endPoint.CallTimeout("NodoRaft.ObtenerEstadoEntradas",
 				raft.Vacio{}, &reply, 15000*time.Millisecond)
 			if err != nil {
-				fmt.Printf("Error en llamada RPC ObtenerIndiceComprometido para nodo %d: %v\n", i, err)
+				fmt.Printf("Error en llamada RPC ObtenerEstadoEntrasdas para nodo %d: %v\n", i, err)
 				return 1
 			}
 			// Verificar si el índice comprometido coincide con el esperado
-			if reply != indiceEsperado {
+			if reply.IndiceComprometido != indiceEsperado {
 				fmt.Printf("Error: Nodo %d tiene CommitIndex %d, pero se esperaba %d\n", i, reply, indiceEsperado)
 				return 1
 			}

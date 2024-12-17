@@ -204,9 +204,9 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	nr.Ram = make(map[string]string)
 	nr.CurrentTerm = 0
 	nr.VotedFor = -1
-	nr.LogEntries = []Entry{}
 	nr.CommitIndex = -1
 	nr.LastApplied = -1
+	nr.LogEntries = make([]Entry, 0)
 	nr.NextIndex = make([]int, len(nodos))
 	nr.MatchIndex = make([]int, len(nodos))
 	nr.conectado = make([]bool, len(nodos))
@@ -331,9 +331,10 @@ type EstadoParcial struct {
 	EsLider bool
 	IdLider int
 }
-type EstadoLog struct {
-	Indice  int
-	Mandato int
+type EstadoEntradas struct {
+	IndiceReplicado    int
+	IndiceComprometido int
+	Mandato            int
 }
 
 type EstadoRemoto struct {
@@ -474,18 +475,20 @@ type Results struct {
 }
 
 // LLamada RPC para obtener el estado del registro del nodo actual
-func (nr *NodoRaft) ObtenerEstadoLog(args Vacio, reply *EstadoLog) error {
+func (nr *NodoRaft) ObtenerEstadoEntradas(args Vacio, reply *EstadoEntradas) error {
 	nr.Mux.Lock()
 	defer nr.Mux.Unlock()
 
 	if len(nr.LogEntries) > 0 {
-		reply.Indice = nr.CommitIndex
+		reply.IndiceReplicado = nr.CommitIndex
 		reply.Mandato = nr.CurrentTerm
+		reply.IndiceComprometido = nr.CommitIndex
 		return nil
 	}
 
-	reply.Indice = 0
+	reply.IndiceReplicado = 0
 	reply.Mandato = 0
+	reply.IndiceComprometido = 0
 	return nil
 }
 
