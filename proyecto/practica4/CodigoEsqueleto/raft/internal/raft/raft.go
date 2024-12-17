@@ -55,20 +55,21 @@ const (
 
 // Constantes de configuración para los temporizadores y comportamientos del sistema Raft
 
-// intervaloLatidos define el tiempo entre cada envío de latidos (heartbeats) por parte del líder.
-const intervaloLatidos = 250 * time.Millisecond
+const SSH = false
 
-// timeoutMin establece el tiempo mínimo de espera antes de que un nodo seguidor
-// considere que no ha recibido un latido o entrada de log, y pase al estado de candidato.
-const timeoutMin = 7000 * time.Millisecond
-
-// timeoutMax establece el tiempo máximo de espera antes de que un nodo seguidor
-// considere que no ha recibido un latido o entrada de log, y pase al estado de candidato.
-// El timeout real será aleatorio dentro del rango [timeoutMin, timeoutMax].
-const timeoutMax = 8000 * time.Millisecond
-
-// timeoutRpc define el tiempo máximo permitido para una llamada RPC.
-const timeoutRpc = 200 * time.Millisecond
+var (
+	// intervaloLatidos define el tiempo entre cada envío de latidos (heartbeats) por parte del líder.
+	intervaloLatidos time.Duration
+	// timeoutMin establece el tiempo mínimo de espera antes de que un nodo seguidor
+	// considere que no ha recibido un latido o entrada de log, y pase al estado de candidato.
+	timeoutMin time.Duration
+	// timeoutMax establece el tiempo máximo de espera antes de que un nodo seguidor
+	// considere que no ha recibido un latido o entrada de log, y pase al estado de candidato.
+	// El timeout real será aleatorio dentro del rango [timeoutMin, timeoutMax].
+	timeoutMax time.Duration
+	// timeoutRpc define el tiempo máximo permitido para una llamada RPC.
+	timeoutRpc time.Duration
+)
 
 // mostrarLatidos es una flag para activar o desactivar la visibilidad de los latidos (heartbeats)
 // en los logs de debug.
@@ -192,6 +193,25 @@ const (
 // poner en marcha Gorutinas para trabajos de larga duracion
 func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	canalAplicarOperacion chan AplicaOperacion) *NodoRaft {
+	if SSH {
+
+		const intervaloLatidos = 1500 * time.Millisecond
+
+		const timeoutMin = 10000 * time.Millisecond
+
+		const timeoutMax = 15000 * time.Millisecond
+
+		const timeoutRpc = 500 * time.Millisecond
+	} else {
+
+		const intervaloLatidos = 250 * time.Millisecond
+
+		const timeoutMin = 500 * time.Millisecond
+
+		const timeoutMax = 1000 * time.Millisecond
+
+		const timeoutRpc = 45 * time.Millisecond
+	}
 	nr := &NodoRaft{}
 	nr.Nodos = nodos
 	nr.AppendEntry = make(chan bool)
@@ -312,6 +332,7 @@ func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, i
 		// Retorna el ID del líder actual para redirigir al cliente
 		idLider = nr.IdLider
 	}
+	nr.Logger.Printf("Nodo %d lider devolvió al cliente: index %d, term %d, esLider %s, valorADevolver %s", indice, mandato, esLider, idLider, valorADevolver)
 	return indice, mandato, esLider, idLider, valorADevolver
 }
 

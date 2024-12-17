@@ -17,7 +17,7 @@ import (
 	"raft/internal/raft"
 )
 
-const TimeoutRpc = 200
+const TimeoutRpc = 500
 
 const (
 	//hosts
@@ -523,7 +523,7 @@ func (cfg *configDespliegue) desconectarNodo(nodo int) {
 func (cfg *configDespliegue) obtenerLog(
 	nodo int) (int, int) {
 	var reply raft.EstadoEntradas
-	err := cfg.nodosRaft[nodo].CallTimeout("NodoRaft.ObtenerEstadoNodoLog",
+	err := cfg.nodosRaft[nodo].CallTimeout("NodoRaft.ObtenerEstadoEntradas",
 		raft.Vacio{}, &reply, TimeoutRpc*time.Millisecond)
 	check.CheckError(err, "Error en llamada RPC ObtenerEstadoRemotoLog")
 	return reply.IndiceReplicado, reply.Mandato
