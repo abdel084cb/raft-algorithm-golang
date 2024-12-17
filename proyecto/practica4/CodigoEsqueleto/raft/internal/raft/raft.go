@@ -194,23 +194,15 @@ const (
 func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	canalAplicarOperacion chan AplicaOperacion) *NodoRaft {
 	if SSH {
-
-		const intervaloLatidos = 1500 * time.Millisecond
-
-		const timeoutMin = 10000 * time.Millisecond
-
-		const timeoutMax = 15000 * time.Millisecond
-
-		const timeoutRpc = 500 * time.Millisecond
+		intervaloLatidos = 1500 * time.Millisecond
+		timeoutMin = 10000 * time.Millisecond
+		timeoutMax = 15000 * time.Millisecond
+		timeoutRpc = 500 * time.Millisecond
 	} else {
-
-		const intervaloLatidos = 250 * time.Millisecond
-
-		const timeoutMin = 500 * time.Millisecond
-
-		const timeoutMax = 1000 * time.Millisecond
-
-		const timeoutRpc = 45 * time.Millisecond
+		intervaloLatidos = 250 * time.Millisecond
+		timeoutMin = 500 * time.Millisecond
+		timeoutMax = 1000 * time.Millisecond
+		timeoutRpc = 45 * time.Millisecond
 	}
 	nr := &NodoRaft{}
 	nr.Nodos = nodos
@@ -332,7 +324,8 @@ func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, i
 		// Retorna el ID del líder actual para redirigir al cliente
 		idLider = nr.IdLider
 	}
-	nr.Logger.Printf("Nodo %d lider devolvió al cliente: index %d, term %d, esLider %s, valorADevolver %s", indice, mandato, esLider, idLider, valorADevolver)
+	nr.Logger.Printf("Nodo %d lider devolvió al cliente: index %d, term %d, esLider %t, idLider %d, valorADevolver %s",
+		nr.Yo, indice, mandato, esLider, idLider, valorADevolver)
 	return indice, mandato, esLider, idLider, valorADevolver
 }
 
@@ -592,7 +585,7 @@ func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 		nr.Logger.Printf("Nodo %d decreció NextIndex[%d] a %d y MatchIndex[%d] a %d debido a inconsistencias en el nodo %d (Term %d)",
 			nr.Yo, indice, nr.NextIndex[indice], indice, nr.MatchIndex[indice], indice, nr.CurrentTerm)
 		nr.conectado[indice] = true
-		nr.EnviarEntradasLog(indice)
+		go nr.EnviarEntradasLog(indice)
 		nr.conectado[indice] = false
 	}
 }
