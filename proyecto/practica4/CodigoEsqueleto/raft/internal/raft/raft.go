@@ -60,15 +60,15 @@ const intervaloLatidos = 250 * time.Millisecond
 
 // timeoutMin establece el tiempo mínimo de espera antes de que un nodo seguidor
 // considere que no ha recibido un latido o entrada de log, y pase al estado de candidato.
-const timeoutMin = 500 * time.Millisecond
+const timeoutMin = 7000 * time.Millisecond
 
 // timeoutMax establece el tiempo máximo de espera antes de que un nodo seguidor
 // considere que no ha recibido un latido o entrada de log, y pase al estado de candidato.
 // El timeout real será aleatorio dentro del rango [timeoutMin, timeoutMax].
-const timeoutMax = 1000 * time.Millisecond
+const timeoutMax = 8000 * time.Millisecond
 
 // timeoutRpc define el tiempo máximo permitido para una llamada RPC.
-const timeoutRpc = 45 * time.Millisecond
+const timeoutRpc = 200 * time.Millisecond
 
 // mostrarLatidos es una flag para activar o desactivar la visibilidad de los latidos (heartbeats)
 // en los logs de debug.
