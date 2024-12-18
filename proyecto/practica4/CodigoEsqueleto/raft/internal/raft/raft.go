@@ -44,7 +44,7 @@ const (
 
 	//  false deshabilita por completo los logs de depuracion
 	// Aseguraros de poner kEnableDebugLogs a false antes de la entrega
-	kEnableDebugLogs = true
+	kEnableDebugLogs = false
 
 	// Poner a true para logear a stdout en lugar de a fichero
 	kLogToStdout = false
@@ -55,7 +55,7 @@ const (
 
 // Constantes de configuración para los temporizadores y comportamientos del sistema Raft
 
-const SSH = true
+const SSH = false
 
 var (
 	// intervaloLatidos define el tiempo entre cada envío de latidos (heartbeats) por parte del líder.
@@ -73,7 +73,7 @@ var (
 
 // mostrarLatidos es una flag para activar o desactivar la visibilidad de los latidos (heartbeats)
 // en los logs de debug.
-const mostrarLatidos = false
+const mostrarLatidos = true
 
 type TipoOperacion struct {
 	Operacion string // La operaciones posibles son "leer" y "escribir"
