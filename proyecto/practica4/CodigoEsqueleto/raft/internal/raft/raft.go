@@ -47,7 +47,7 @@ const (
 	kEnableDebugLogs = true
 
 	// Poner a true para logear a stdout en lugar de a fichero
-	kLogToStdout = true
+	kLogToStdout = false
 
 	// Cambiar esto para salida de logs en un directorio diferente
 	kLogOutputDir = "./logs_raft/"
@@ -55,7 +55,7 @@ const (
 
 // Constantes de configuración para los temporizadores y comportamientos del sistema Raft
 
-const SSH = false
+const SSH = true
 
 var (
 	// intervaloLatidos define el tiempo entre cada envío de latidos (heartbeats) por parte del líder.

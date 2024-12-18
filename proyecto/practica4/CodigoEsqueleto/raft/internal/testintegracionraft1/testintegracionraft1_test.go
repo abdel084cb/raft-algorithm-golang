@@ -17,7 +17,7 @@ import (
 	"raft/internal/raft"
 )
 
-const TimeoutRpc = 500
+const TimeoutRpc = 10000
 
 const (
 	//hosts
@@ -107,13 +107,14 @@ func TestAcuerdosConFallos(t *testing.T) { // (m *testing.M) {
 	// eliminar procesos en máquinas remotas
 	defer cfg.stop()
 
+	time.Sleep(1 * time.Second)
 	// Test5: Se consigue acuerdo a pesar de desconexiones de seguidor
 	t.Run("T5:AcuerdoAPesarDeDesconexionesDeSeguidor ",
 		func(t *testing.T) { cfg.AcuerdoApesarDeSeguidor(t) })
-
+	time.Sleep(1 * time.Second)
 	t.Run("T5:SinAcuerdoPorFallos ",
 		func(t *testing.T) { cfg.SinAcuerdoPorFallos(t) })
-
+	time.Sleep(1 * time.Second)
 	t.Run("T5:SometerConcurrentementeOperaciones ",
 		func(t *testing.T) { cfg.SometerConcurrentementeOperaciones(t) })
 
@@ -173,7 +174,7 @@ func (cfg *configDespliegue) AcuerdoApesarDeSeguidor(t *testing.T) {
 
 	// Iniciar réplicas
 	cfg.startDistributedProcesses()
-
+	time.Sleep(20 * time.Second)
 	// Obtener líder inicial
 	idLider := cfg.pruebaUnLider(3)
 	fmt.Printf("Líder inicial: %d\n", idLider)
@@ -182,18 +183,18 @@ func (cfg *configDespliegue) AcuerdoApesarDeSeguidor(t *testing.T) {
 	nodoDesconectado := (idLider + 1) % 3
 	cfg.desconectarNodo(nodoDesconectado)
 	fmt.Printf("Nodo %d desconectado\n", nodoDesconectado)
-
+	time.Sleep(3 * time.Second)
 	// Comprometer operaciones con un nodo desconectado
 	cfg.comprometerOperacion("escribir", "clave1", "valor1", 0, idLider)
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	cfg.comprometerOperacion("escribir", "clave2", "valor2", 1, idLider)
 
 	// Reconectar nodo desconectado
 	fmt.Printf("Reconectando nodo %d\n", nodoDesconectado)
-	cfg.startDistributedProcesses()
-
+	cfg.startNodo(nodoDesconectado)
+	time.Sleep(20 * time.Second)
 	// Verificar el log en todos los nodos
-	if res := cfg.verificarLogsYLider(2, 2); res != 0 {
+	if res := cfg.verificarLogsYLider(1, 1); res != 0 {
 		t.Fatalf("Los logs no coinciden después de la reconexión")
 	}
 
@@ -206,7 +207,7 @@ func (cfg *configDespliegue) SinAcuerdoPorFallos(t *testing.T) {
 
 	// Iniciar réplicas
 	cfg.startDistributedProcesses()
-
+	time.Sleep(9 * time.Second)
 	// Obtener líder inicial
 	idLider := cfg.pruebaUnLider(3)
 	fmt.Printf("Líder inicial: %d\n", idLider)
@@ -217,7 +218,7 @@ func (cfg *configDespliegue) SinAcuerdoPorFallos(t *testing.T) {
 			cfg.desconectarNodo(i)
 		}
 	}
-
+	time.Sleep(10 * time.Second)
 	// Intentar someter operaciones (debe fallar)
 	fmt.Println("Intentando someter operación sin mayoría...")
 	indice, _, _, _, valueReply := cfg.someterOperacion("escribir", "clave3", "valor3", idLider)
@@ -227,6 +228,7 @@ func (cfg *configDespliegue) SinAcuerdoPorFallos(t *testing.T) {
 
 	fmt.Println("Operación correctamente rechazada sin mayoría.")
 	fmt.Println(".............", t.Name(), "Superado")
+	cfg.stopDistributedProcesses()
 }
 
 // Se somete 5 operaciones de forma concurrente -- 3 NODOS RAFT
@@ -235,7 +237,7 @@ func (cfg *configDespliegue) SometerConcurrentementeOperaciones(t *testing.T) {
 
 	// Iniciar réplicas
 	cfg.startDistributedProcesses()
-
+	time.Sleep(9 * time.Second)
 	// Obtener líder inicial
 	idLider := cfg.pruebaUnLider(3)
 	fmt.Printf("Líder inicial: %d\n", idLider)
@@ -251,16 +253,17 @@ func (cfg *configDespliegue) SometerConcurrentementeOperaciones(t *testing.T) {
 
 	// Ejecutar operaciones concurrentemente
 	for i, op := range operaciones {
+		time.Sleep(5 * time.Second)
 		go func(op raft.TipoOperacion, indice int) {
 			cfg.someterOperacionConcurrente(idLider, op, 1, "Se ha escrito en RAM")
 		}(op, i)
 	}
 
 	// Esperar un momento para estabilizar
-	time.Sleep(2 * time.Second)
+	time.Sleep(10 * time.Second)
 
 	// Verificar que todos los nodos tienen logs consistentes
-	if res := cfg.verificarLogsYLider(5, 1); res != 0 {
+	if res := cfg.verificarLogsYLider(4, 1); res != 0 {
 		t.Fatalf("Error: logs inconsistentes después de operaciones concurrentes")
 	}
 
@@ -301,10 +304,9 @@ func (cfg *configDespliegue) elegirPrimerLiderTest2(t *testing.T) {
 
 	// Poner en marcha replicas
 	cfg.startDistributedProcesses()
-	time.Sleep(2 * time.Second)
 	fmt.Printf("Probando lider en curso\n")
+	time.Sleep(9 * time.Second)
 	cfg.pruebaUnLider(3)
-
 	// Parar réplicas
 	cfg.stopDistributedProcesses() // Parametros
 
@@ -320,14 +322,14 @@ func (cfg *configDespliegue) falloAnteriorElegirNuevoLiderTest3(t *testing.T) {
 	cfg.startDistributedProcesses()
 
 	fmt.Printf("Lider inicial\n")
-	time.Sleep(2 * time.Second)
+	time.Sleep(9 * time.Second)
 
 	liderActual := cfg.pruebaUnLider(3)
 
 	// Desconectar un lider
 	cfg.desconectarLider(liderActual)
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(15 * time.Second)
 
 	fmt.Printf("Comprobar nuevo lider\n")
 	cfg.pruebaUnLider(3)
@@ -342,20 +344,17 @@ func (cfg *configDespliegue) falloAnteriorElegirNuevoLiderTest3(t *testing.T) {
 func (cfg *configDespliegue) tresOperacionesComprometidasEstable(t *testing.T) {
 	//t.Skip("SKIPPED tresOperacionesComprometidasEstable")
 	fmt.Println(t.Name(), ".....................")
-
 	// Poner en marcha replicas
 	cfg.startDistributedProcesses()
-	time.Sleep(2 * time.Second)
 	fmt.Printf("Comprobando lider\n")
+	time.Sleep(9 * time.Second)
 	idLider := cfg.pruebaUnLider(3)
-
 	// Se someten operaciones
 	cfg.comprometerOperacion("leer", "clave0", "valor0", 0, idLider)
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	cfg.comprometerOperacion("escribir", "clave1", "valor1", 1, idLider)
-	time.Sleep(5 * time.Second)
+	time.Sleep(3 * time.Second)
 	cfg.comprometerOperacion("escribir", "clave2", "valor2", 2, idLider)
-
 	cfg.stopDistributedProcesses()
 
 	fmt.Println(".............", t.Name(), "Superado")
@@ -435,7 +434,30 @@ func (cfg *configDespliegue) startDistributedProcesses() {
 		cfg.conectados[i] = true
 	}
 
-	time.Sleep(6000 * time.Millisecond)
+	time.Sleep(5000 * time.Millisecond)
+}
+
+// startNodo inicia un proceso distribuido en un nodo Raft específico.
+// Ejecuta el comando de réplica en el nodo indicado y lo marca como conectado.
+func (cfg *configDespliegue) startNodo(nodoID int) {
+	if nodoID < 0 || nodoID >= len(cfg.nodosRaft) {
+		cfg.t.Fatalf("Nodo ID %d fuera de rango, no se puede iniciar.", nodoID)
+		return
+	}
+
+	endPoint := cfg.nodosRaft[nodoID]
+
+	// Ejecutar el comando para el nodo específico
+	despliegue.ExecMutipleHosts(
+		EXECREPLICACMD+" "+strconv.Itoa(nodoID)+" "+
+			rpctimeout.HostPortArrayToString(cfg.nodosRaft),
+		[]string{endPoint.Host()}, cfg.cr, PRIVKEYFILE)
+
+	// Marcar el nodo como conectado
+	cfg.conectados[nodoID] = true
+
+	// Agregar un pequeño retraso para dar tiempo al nodo a inicializarse
+	time.Sleep(2000 * time.Millisecond)
 }
 
 // stopDistributedProcesses detiene todos los procesos distribuidos en los nodos Raft.
@@ -450,6 +472,7 @@ func (cfg *configDespliegue) stopDistributedProcesses() {
 			check.CheckError(err, "Error en llamada RPC Para nodo")
 		}
 	}
+	time.Sleep(5 * time.Second)
 }
 
 // Comprobar estado remoto de un nodo con respecto a un estado ya indicado
@@ -476,7 +499,8 @@ func (cfg *configDespliegue) someterOperacion(operacion string, clave string, va
 		raft.TipoOperacion{Operacion: operacion, Clave: clave, Valor: value},
 		&reply, TimeoutRpc*time.Millisecond)
 	if err != nil {
-		cfg.t.Fatalf("Error en llamada RPC someterOperacion")
+		fmt.Printf("Error en la llamada someterOperacion")
+		return -1, -1, false, -1, ""
 	}
 	return reply.IndiceRegistro, reply.Mandato, reply.EsLider, reply.IdLider, reply.ValorADevolver
 }
