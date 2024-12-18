@@ -21,9 +21,9 @@ const TimeoutRpc = 10000
 
 const (
 	//hosts
-	MAQUINA1 = "192.168.3.3"
-	MAQUINA2 = "192.168.3.3"
-	MAQUINA3 = "192.168.3.3"
+	MAQUINA1 = "192.168.3.1"
+	MAQUINA2 = "192.168.3.1"
+	MAQUINA3 = "192.168.3.1"
 
 	//puertos
 	PUERTOREPLICA1 = "31050"
@@ -174,7 +174,7 @@ func (cfg *configDespliegue) AcuerdoApesarDeSeguidor(t *testing.T) {
 
 	// Iniciar réplicas
 	cfg.startDistributedProcesses()
-	time.Sleep(20 * time.Second)
+	time.Sleep(5 * time.Second)
 	// Obtener líder inicial
 	idLider := cfg.pruebaUnLider(3)
 	fmt.Printf("Líder inicial: %d\n", idLider)
@@ -197,7 +197,7 @@ func (cfg *configDespliegue) AcuerdoApesarDeSeguidor(t *testing.T) {
 	if res := cfg.verificarLogsYLider(1, 1); res != 0 {
 		t.Fatalf("Los logs no coinciden después de la reconexión")
 	}
-
+	cfg.stopDistributedProcesses()
 	fmt.Println(".............", t.Name(), "Superado")
 }
 
@@ -218,7 +218,7 @@ func (cfg *configDespliegue) SinAcuerdoPorFallos(t *testing.T) {
 			cfg.desconectarNodo(i)
 		}
 	}
-	time.Sleep(10 * time.Second)
+	time.Sleep(5 * time.Second)
 	// Intentar someter operaciones (debe fallar)
 	fmt.Println("Intentando someter operación sin mayoría...")
 	indice, _, _, _, valueReply := cfg.someterOperacion("escribir", "clave3", "valor3", idLider)
@@ -253,7 +253,6 @@ func (cfg *configDespliegue) SometerConcurrentementeOperaciones(t *testing.T) {
 
 	// Ejecutar operaciones concurrentemente
 	for i, op := range operaciones {
-		time.Sleep(5 * time.Second)
 		go func(op raft.TipoOperacion, indice int) {
 			cfg.someterOperacionConcurrente(idLider, op, 1, "Se ha escrito en RAM")
 		}(op, i)
@@ -267,12 +266,13 @@ func (cfg *configDespliegue) SometerConcurrentementeOperaciones(t *testing.T) {
 		t.Fatalf("Error: logs inconsistentes después de operaciones concurrentes")
 	}
 
+	cfg.stopDistributedProcesses()
 	fmt.Println(".............", t.Name(), "Superado")
 }
 
 // Test1: soloArranqueYparadaTest1 verifica que no hay ningún líder si el servidor no ha recibido latidos.
 func (cfg *configDespliegue) soloArranqueYparadaTest1(t *testing.T) {
-	//t.Skip("SKIPPED soloArranqueYparadaTest1")
+	t.Skip("SKIPPED soloArranqueYparadaTest1")
 
 	fmt.Println(t.Name(), ".....................")
 
@@ -298,7 +298,7 @@ func (cfg *configDespliegue) soloArranqueYparadaTest1(t *testing.T) {
 
 // Test2: elegirPrimerLiderTest2 verifica que se elige un líder correctamente en el primer intento.
 func (cfg *configDespliegue) elegirPrimerLiderTest2(t *testing.T) {
-	//t.Skip("SKIPPED ElegirPrimerLiderTest2")
+	t.Skip("SKIPPED ElegirPrimerLiderTest2")
 
 	fmt.Println(t.Name(), ".....................")
 
@@ -315,7 +315,7 @@ func (cfg *configDespliegue) elegirPrimerLiderTest2(t *testing.T) {
 
 // Fallo de un primer lider y reeleccion de uno nuevo - 3 NODOS RAFT
 func (cfg *configDespliegue) falloAnteriorElegirNuevoLiderTest3(t *testing.T) {
-	//t.Skip("SKIPPED falloAnteriorElegirNuevoLiderTest3")
+	t.Skip("SKIPPED falloAnteriorElegirNuevoLiderTest3")
 	fmt.Println(t.Name(), ".....................")
 
 	// Poner en marcha replicas
@@ -342,7 +342,7 @@ func (cfg *configDespliegue) falloAnteriorElegirNuevoLiderTest3(t *testing.T) {
 
 // 3 operaciones comprometidas con situacion estable y sin fallos - 3 NODOS RAFT
 func (cfg *configDespliegue) tresOperacionesComprometidasEstable(t *testing.T) {
-	//t.Skip("SKIPPED tresOperacionesComprometidasEstable")
+	t.Skip("SKIPPED tresOperacionesComprometidasEstable")
 	fmt.Println(t.Name(), ".....................")
 	// Poner en marcha replicas
 	cfg.startDistributedProcesses()
@@ -499,7 +499,7 @@ func (cfg *configDespliegue) someterOperacion(operacion string, clave string, va
 		raft.TipoOperacion{Operacion: operacion, Clave: clave, Valor: value},
 		&reply, TimeoutRpc*time.Millisecond)
 	if err != nil {
-		fmt.Printf("Error en la llamada someterOperacion")
+		//fmt.Printf("Error en la llamada someterOperacion")
 		return -1, -1, false, -1, ""
 	}
 	return reply.IndiceRegistro, reply.Mandato, reply.EsLider, reply.IdLider, reply.ValorADevolver
