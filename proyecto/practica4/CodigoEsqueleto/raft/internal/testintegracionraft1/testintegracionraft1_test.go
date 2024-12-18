@@ -666,7 +666,7 @@ func (cfg *configDespliegue) concurrentOperation(leader int, operation raft.Tipo
 	}
 
 	// Confirmar que la operación se sometió exitosamente y reportar los detalles.
-	fmt.Printf("Operación sometida correctamente (lider: %v, termino: %v, índice: %v)\n",
+	fmt.Printf("Operación sometida correctamente (lider: %v, termino: %v)\n",
 		reply.IdLider, reply.Mandato, reply.IndiceRegistro)
 	return 0 // Indica éxito.
 }
