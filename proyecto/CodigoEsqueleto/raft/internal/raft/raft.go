@@ -1,5 +1,4 @@
-// Escribir vuestro código de funcionalidad Raft en este fichero
-//
+// Implementación de la funcionalidad Raft.
 
 package raft
 
@@ -177,20 +176,13 @@ const (
 	StateLeader    = "leader"
 )
 
-// Creacion de un nuevo nodo de eleccion
+// NuevoNodo crea e inicializa un nodo Raft.
 //
-// Tabla de <Direccion IP:puerto> de cada nodo incluido a si mismo.
-//
-// <Direccion IP:puerto> de este nodo esta en nodos[yo]
-//
-// Todos los arrays nodos[] de los nodos tienen el mismo orden
-
-// canalAplicar es un canal donde, en la practica 5, se recogerán las
-// operaciones a aplicar a la máquina de estados. Se puede asumir que
-// este canal se consumira de forma continúa.
-//
-// NuevoNodo() debe devolver resultado rápido, por lo que se deberían
-// poner en marcha Gorutinas para trabajos de larga duracion
+// nodos contiene las direcciones de todas las réplicas, incluido este nodo,
+// y yo indica su posición dentro de esa lista común.
+// canalAplicarOperacion entrega a la máquina de estados las operaciones
+// comprometidas. La función solo realiza la inicialización; el trabajo de
+// larga duración se inicia desde la gorutina de gestión del liderazgo.
 func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	canalAplicarOperacion chan AplicaOperacion) *NodoRaft {
 	if SSH {
@@ -252,21 +244,13 @@ func NuevoNodo(nodos []rpctimeout.HostPort, yo int,
 	return nr
 }
 
-// Metodo Para() utilizado cuando no se necesita mas al nodo
-//
-// Quizas interesante desactivar la salida de depuracion
-// de este nodo
+// para programa la finalización del proceso cuando el nodo deja de utilizarse.
 func (nr *NodoRaft) para() {
 	go func() { time.Sleep(5 * time.Millisecond); os.Exit(0) }()
 }
 
-// Devuelve "yo", mandato en curso y si este nodo cree ser lider
-//
-// Primer valor devuelto es el indice de este  nodo Raft el el conjunto de nodos
-// la operacion si consigue comprometerse.
-// El segundo valor es el mandato en curso
-// El tercer valor es true si el nodo cree ser el lider
-// Cuarto valor es el lider, es el indice del líder si no es él
+// obtenerEstado devuelve el identificador local, el mandato actual, si el nodo
+// se considera líder y el identificador del líder conocido.
 func (nr *NodoRaft) obtenerEstado() (int, int, bool, int) {
 	var yo int = nr.Yo
 	var mandato int = nr.CurrentTerm
@@ -276,22 +260,9 @@ func (nr *NodoRaft) obtenerEstado() (int, int, bool, int) {
 	return yo, mandato, esLider, idLider
 }
 
-// El servicio que utilice Raft (base de datos clave/valor, por ejemplo)
-// Quiere buscar un acuerdo de posicion en registro para siguiente operacion
-// solicitada por cliente.
-
-// Si el nodo no es el lider, devolver falso
-// Sino, comenzar la operacion de consenso sobre la operacion y devolver en
-// cuanto se consiga
-//
-// No hay garantia que esta operacion consiga comprometerse en una entrada de
-// de registro, dado que el lider puede fallar y la entrada ser reemplazada
-// en el futuro.
-// Primer valor devuelto es el indice del registro donde se va a colocar
-// la operacion si consigue comprometerse.
-// El segundo valor es el mandato en curso
-// El tercer valor es true si el nodo cree ser el lider
-// Cuarto valor es el lider, es el indice del líder si no es él
+// someterOperacion incorpora una operación al registro si el nodo es líder y
+// espera su confirmación. Si no lo es, devuelve la identidad del líder conocido
+// para que el cliente pueda redirigir la petición.
 func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, int, string) {
 	indice := -1                   // Índice de la operación en el registro
 	mandato := -1                  // Término actual del nodo
@@ -330,11 +301,14 @@ func (nr *NodoRaft) someterOperacion(operacion TipoOperacion) (int, int, bool, i
 }
 
 // -----------------------------------------------------------------------
-// LLAMADAS RPC al API
+// LLAMADAS RPC RECIBIDAS: API DE SERVICIO
 //
-// Si no tenemos argumentos o respuesta estructura vacia (tamaño cero)
+// Estas funciones las invocan clientes externos para detener un nodo,
+// consultar su estado o someter una operación al consenso.
+// Vacio se utiliza cuando una RPC no requiere argumentos ni respuesta.
 type Vacio struct{}
 
+// ParaNodo atiende la petición remota de parada del nodo.
 func (nr *NodoRaft) ParaNodo(args Vacio, reply *Vacio) error {
 	defer nr.para()
 	return nil
@@ -356,6 +330,7 @@ type EstadoRemoto struct {
 	EstadoParcial
 }
 
+// ObtenerEstadoNodo atiende una consulta remota sobre el estado del nodo.
 func (nr *NodoRaft) ObtenerEstadoNodo(args Vacio, reply *EstadoRemoto) error {
 	reply.IdNodo, reply.Mandato, reply.EsLider, reply.IdLider = nr.obtenerEstado()
 	return nil
@@ -367,6 +342,7 @@ type ResultadoRemoto struct {
 	EstadoParcial
 }
 
+// SometerOperacionRaft atiende una operación remitida por un cliente externo.
 func (nr *NodoRaft) SometerOperacionRaft(operacion TipoOperacion,
 	reply *ResultadoRemoto) error {
 	reply.IndiceRegistro, reply.Mandato, reply.EsLider,
@@ -375,13 +351,9 @@ func (nr *NodoRaft) SometerOperacionRaft(operacion TipoOperacion,
 }
 
 // -----------------------------------------------------------------------
-// LLAMADAS RPC protocolo RAFT
+// TIPOS DE MENSAJES DEL PROTOCOLO RAFT
 //
-// Structura de ejemplo de argumentos de RPC PedirVoto.
-//
-// Recordar
-// -----------
-// Nombres de campos deben comenzar con letra mayuscula !
+// Los campos son exportados para que el mecanismo RPC pueda codificarlos.
 type ArgsPeticionVoto struct {
 	Term         int
 	CandidateID  int
@@ -389,18 +361,15 @@ type ArgsPeticionVoto struct {
 	LastLogTerm  int
 }
 
-// Structura de ejemplo de respuesta de RPC PedirVoto,
-//
-// Recordar
-// -----------
-// Nombres de campos deben comenzar con letra mayuscula !
 type RespuestaPeticionVoto struct {
 	Term    int
 	Granted bool
 }
 
-// Pre: min <= max
-// Post: Genera un valor aleatorio entre [min, max].
+// -----------------------------------------------------------------------
+// FUNCIONES AUXILIARES
+
+// random devuelve una duración aleatoria dentro del intervalo [min, max].
 func random(min, max time.Duration) time.Duration {
 	if max <= min {
 		panic("random: max debe ser mayor que min")
@@ -414,7 +383,18 @@ func random(min, max time.Duration) time.Duration {
 	return min + time.Duration(randValue.Int64())
 }
 
-// Metodo para RPC PedirVoto
+// min devuelve el menor de los dos valores recibidos.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// -----------------------------------------------------------------------
+// LLAMADAS RPC RECIBIDAS: PROTOCOLO RAFT
+
+// PedirVoto procesa una solicitud de voto recibida de un nodo candidato.
 func (nr *NodoRaft) PedirVoto(peticion *ArgsPeticionVoto,
 	reply *RespuestaPeticionVoto) error {
 
@@ -488,7 +468,7 @@ type Results struct {
 	Success bool
 }
 
-// LLamada RPC para obtener el estado del registro del nodo actual
+// ObtenerEstadoEntradas devuelve el estado del registro solicitado remotamente.
 func (nr *NodoRaft) ObtenerEstadoEntradas(args Vacio, reply *EstadoEntradas) error {
 	nr.Mux.Lock()
 	defer nr.Mux.Unlock()
@@ -506,7 +486,88 @@ func (nr *NodoRaft) ObtenerEstadoEntradas(args Vacio, reply *EstadoEntradas) err
 	return nil
 }
 
-// Envia entradas de log al nodo con indice indicado
+// AppendEntries procesa un latido o una entrada de registro recibida del líder.
+func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) error {
+
+	// Caso 1: Se recibe un latido (sin nuevas entradas)
+	if args.Entries.Operation.Operacion == "" {
+		if args.Term < nr.CurrentTerm {
+			// El término del líder que envió el latido es obsoleto, se rechaza
+			nr.Logger.Printf("Nodo %d rechaza el latido del nodo %d por término menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
+			results.Success = false
+			results.Term = nr.CurrentTerm
+		} else {
+			if mostrarLatidos {
+				nr.Logger.Printf("Nodo %d recibe el latido del nodo %d (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
+			}
+			// Actualizar término y líder si el término es válido
+			nr.Mux.Lock()
+			nr.CurrentTerm = args.Term
+			nr.IdLider = args.LeaderID
+			// Verificar si LeaderCommitIndex indica nuevos compromisos
+			if args.LeaderCommitIndex > nr.CommitIndex {
+				nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
+				nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d por latido", nr.Yo, nr.CommitIndex)
+			}
+			nr.Mux.Unlock()
+			results.Success = true
+			results.Term = nr.CurrentTerm
+			nr.AppendEntry <- true // Notificar que se recibió un latido
+		}
+		return nil
+	} else {
+		// Caso 2: Se reciben nuevas entradas para replicar
+		nr.Logger.Printf("Nodo %d recibe entrada de log del nodo %d (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
+
+		// Verificar si el término del líder es válido
+		if args.Term < nr.CurrentTerm {
+			nr.Logger.Printf("Nodo %d rechaza entrada de log del nodo %d por término menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
+			results.Success = false
+			results.Term = nr.CurrentTerm
+			return nil
+		}
+		nr.Mux.Lock()
+		nr.CurrentTerm = args.Term
+		nr.Mux.Unlock()
+
+		// Verificar si el log del seguidor coincide con el del líder en PrevLogIndex
+		if args.PrevLogIndex >= len(nr.LogEntries) || (args.PrevLogIndex >= 0 && nr.LogEntries[args.PrevLogIndex].Term != args.PrevLogTerm) {
+			// La entrada previa no coincide, rechazar la solicitud
+			nr.Logger.Printf("Nodo %d rechaza entrada de log por inconsistencia en PrevLogIndex o PrevLogTerm", nr.Yo)
+			results.Success = false
+			return nil
+		}
+
+		// Truncar el log si hay entradas conflictivas
+		if args.PrevLogIndex+1 < len(nr.LogEntries) {
+			nr.LogEntries = nr.LogEntries[:args.PrevLogIndex+1]
+			nr.Logger.Printf("Nodo %d truncó su log hasta el índice %d", nr.Yo, args.PrevLogIndex)
+		}
+
+		// Añadir las nuevas entradas al log
+		nr.LogEntries = append(nr.LogEntries, args.Entries)
+		nr.Logger.Printf("Nodo %d aplicó nueva entrada al log: Term=%d, Index=%d, Operación=%s", nr.Yo,
+			args.Entries.Term, args.Entries.Index, args.Entries.Operation.Operacion)
+
+		// Actualizar el CommitIndex
+		if args.LeaderCommitIndex > nr.CommitIndex {
+			nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
+			nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d", nr.Yo, nr.CommitIndex)
+		}
+
+		results.Term = nr.CurrentTerm
+		results.Success = true
+		nr.AppendEntry <- true // Notificar que se recibió una entrada de log
+	}
+	return nil
+}
+
+// -----------------------------------------------------------------------
+// LLAMADAS RPC SALIENTES
+//
+// Estas funciones actúan como cliente RPC para comunicarse con los demás nodos.
+
+// EnviarEntradasLog replica la siguiente entrada pendiente al seguidor indicado.
 func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 
 	// Si hay nuevas entradas en el log, se preparan para el envío
@@ -590,7 +651,7 @@ func (nr *NodoRaft) EnviarEntradasLog(indice int) {
 	}
 }
 
-// Decide si enviar entradas de log o simplemente un latido
+// EnviarAppendEntries decide si el siguiente mensaje al nodo es una entrada o un latido.
 func (nr *NodoRaft) EnviarAppendEntries(indice int) {
 	if !nr.conectado[indice] {
 		if len(nr.LogEntries)-1 >= nr.NextIndex[indice] {
@@ -603,120 +664,7 @@ func (nr *NodoRaft) EnviarAppendEntries(indice int) {
 	}
 }
 
-// Función auxiliar para calcular el mínimo entre dos valores
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// Metodo de tratamiento de llamadas RPC AppendEntries
-func (nr *NodoRaft) AppendEntries(args *ArgAppendEntries, results *Results) error {
-
-	// Caso 1: Se recibe un latido (sin nuevas entradas)
-	if args.Entries.Operation.Operacion == "" {
-		if args.Term < nr.CurrentTerm {
-			// El término del líder que envió el latido es obsoleto, se rechaza
-			nr.Logger.Printf("Nodo %d rechaza el latido del nodo %d por término menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
-			results.Success = false
-			results.Term = nr.CurrentTerm
-		} else {
-			if mostrarLatidos {
-				nr.Logger.Printf("Nodo %d recibe el latido del nodo %d (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
-			}
-			// Actualizar término y líder si el término es válido
-			nr.Mux.Lock()
-			nr.CurrentTerm = args.Term
-			nr.IdLider = args.LeaderID
-			// Verificar si LeaderCommitIndex indica nuevos compromisos
-			if args.LeaderCommitIndex > nr.CommitIndex {
-				nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
-				nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d por latido", nr.Yo, nr.CommitIndex)
-			}
-			nr.Mux.Unlock()
-			results.Success = true
-			results.Term = nr.CurrentTerm
-			nr.AppendEntry <- true // Notificar que se recibió un latido
-		}
-		return nil
-	} else {
-		// Caso 2: Se reciben nuevas entradas para replicar
-		nr.Logger.Printf("Nodo %d recibe entrada de log del nodo %d (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
-
-		// Verificar si el término del líder es válido
-		if args.Term < nr.CurrentTerm {
-			nr.Logger.Printf("Nodo %d rechaza entrada de log del nodo %d por término menor (Term %d)", nr.Yo, args.LeaderID, nr.CurrentTerm)
-			results.Success = false
-			results.Term = nr.CurrentTerm
-			return nil
-		}
-		nr.Mux.Lock()
-		nr.CurrentTerm = args.Term
-		nr.Mux.Unlock()
-
-		// Verificar si el log del seguidor coincide con el del líder en PrevLogIndex
-		if args.PrevLogIndex >= len(nr.LogEntries) || (args.PrevLogIndex >= 0 && nr.LogEntries[args.PrevLogIndex].Term != args.PrevLogTerm) {
-			// La entrada previa no coincide, rechazar la solicitud
-			nr.Logger.Printf("Nodo %d rechaza entrada de log por inconsistencia en PrevLogIndex o PrevLogTerm", nr.Yo)
-			results.Success = false
-			return nil
-		}
-
-		// Truncar el log si hay entradas conflictivas
-		if args.PrevLogIndex+1 < len(nr.LogEntries) {
-			nr.LogEntries = nr.LogEntries[:args.PrevLogIndex+1]
-			nr.Logger.Printf("Nodo %d truncó su log hasta el índice %d", nr.Yo, args.PrevLogIndex)
-		}
-
-		// Añadir las nuevas entradas al log
-		nr.LogEntries = append(nr.LogEntries, args.Entries)
-		nr.Logger.Printf("Nodo %d aplicó nueva entrada al log: Term=%d, Index=%d, Operación=%s", nr.Yo,
-			args.Entries.Term, args.Entries.Index, args.Entries.Operation.Operacion)
-
-		// Actualizar el CommitIndex
-		if args.LeaderCommitIndex > nr.CommitIndex {
-			nr.CommitIndex = min(args.LeaderCommitIndex, len(nr.LogEntries)-1)
-			nr.Logger.Printf("Nodo %d actualizó CommitIndex a %d", nr.Yo, nr.CommitIndex)
-		}
-
-		results.Term = nr.CurrentTerm
-		results.Success = true
-		nr.AppendEntry <- true // Notificar que se recibió una entrada de log
-	}
-	return nil
-}
-
-// ----- Metodos/Funciones a utilizar como clientes
-//
-//
-
-// Ejemplo de código enviarPeticionVoto
-//
-// nodo int -- indice del servidor destino en nr.nodos[]
-//
-// args *RequestVoteArgs -- argumentos par la llamada RPC
-//
-// reply *RequestVoteReply -- respuesta RPC
-//
-// Los tipos de argumentos y respuesta pasados a CallTimeout deben ser
-// los mismos que los argumentos declarados en el metodo de tratamiento
-// de la llamada (incluido si son punteros
-//
-// Si en la llamada RPC, la respuesta llega en un intervalo de tiempo,
-// la funcion devuelve true, sino devuelve false
-//
-// la llamada RPC deberia tener un timout adecuado.
-//
-// Un resultado falso podria ser causado por una replica caida,
-// un servidor vivo que no es alcanzable (por problemas de red ?),
-// una petición perdida, o una respuesta perdida
-//
-// Para problemas con funcionamiento de RPC, comprobar que la primera letra
-// del nombre  todo los campos de la estructura (y sus subestructuras)
-// pasadas como parametros en las llamadas RPC es una mayuscula,
-// Y que la estructura de recuperacion de resultado sea un puntero a estructura
-// y no la estructura misma.
+// enviarPeticionVoto solicita un voto al nodo indicado y devuelve si la RPC respondió.
 func (nr *NodoRaft) enviarPeticionVoto(nodo int, args *ArgsPeticionVoto,
 	reply *RespuestaPeticionVoto) bool {
 
@@ -729,6 +677,7 @@ func (nr *NodoRaft) enviarPeticionVoto(nodo int, args *ArgsPeticionVoto,
 	return err == nil
 }
 
+// EnviarLatido envía un AppendEntries vacío para mantener activo el liderazgo.
 func (nr *NodoRaft) EnviarLatido(indice int) {
 	// Validar índices antes de acceder al log
 	var prevLogIndex, prevLogTerm int
@@ -785,7 +734,10 @@ func (nr *NodoRaft) EnviarLatido(indice int) {
 	}
 }
 
-// El nodo raft pasa a tener el estado "nuevoEstado"
+// -----------------------------------------------------------------------
+// GESTIÓN LOCAL DEL ESTADO Y DEL CICLO DE VIDA
+
+// cambiarEstado actualiza el rol local del nodo y deja constancia en el registro.
 func (nr *NodoRaft) cambiarEstado(nuevoEstado string) {
 	nr.Mux.Lock()
 	nr.Logger.Printf("Nodo %d cambia estado de %s a %s (Term %d)", nr.Yo, nr.State, nuevoEstado, nr.CurrentTerm)
@@ -793,7 +745,7 @@ func (nr *NodoRaft) cambiarEstado(nuevoEstado string) {
 	nr.Mux.Unlock()
 }
 
-// Inicializa un timer con un desfase inicial aleatorio
+// inicializarTimerAleatorio crea el temporizador con un desfase inicial aleatorio.
 func (nr *NodoRaft) inicializarTimerAleatorio() {
 	// Desfase aleatorio inicial
 	initialOffset := random(50*time.Millisecond, 150*time.Millisecond)
@@ -801,7 +753,7 @@ func (nr *NodoRaft) inicializarTimerAleatorio() {
 	nr.reiniciarTimer(timeout + initialOffset)
 }
 
-// Reinicia el temporizador con una nueva duración
+// reiniciarTimer reemplaza la espera actual del temporizador por la duración indicada.
 func (nr *NodoRaft) reiniciarTimer(duracion time.Duration) {
 	nr.Mux.Lock()
 	defer nr.Mux.Unlock()
@@ -818,7 +770,7 @@ func (nr *NodoRaft) reiniciarTimer(duracion time.Duration) {
 	}
 }
 
-// Funcion que se encarga de aplicar las operaciones a la máquina de estados
+// AplicarOperacionesInf consume las operaciones comprometidas y actualiza la RAM.
 func (nr *NodoRaft) AplicarOperacionesInf() {
 	for op := range nr.CanalAplicar {
 		nr.Mux.Lock()
@@ -850,7 +802,7 @@ func (nr *NodoRaft) AplicarOperacionesInf() {
 	}
 }
 
-// Método auxiliar para aplicar operaciones comprometidas a la máquina de estados
+// aplicarOperaciones entrega al canal las entradas comprometidas aún no aplicadas.
 func (nr *NodoRaft) aplicarOperaciones() {
 	for nr.LastApplied < nr.CommitIndex {
 		nr.LastApplied++
@@ -864,7 +816,7 @@ func (nr *NodoRaft) aplicarOperaciones() {
 	}
 }
 
-// Lógica base de raft
+// GestionarLiderazgo ejecuta el bucle principal de roles, temporizadores y latidos.
 func (nr *NodoRaft) GestionarLiderazgo() {
 	nr.inicializarTimerAleatorio()
 	go nr.AplicarOperacionesInf()
@@ -917,6 +869,7 @@ func (nr *NodoRaft) GestionarLiderazgo() {
 	}
 }
 
+// empezarEleccion solicita votos y, si obtiene mayoría, convierte al nodo en líder.
 func (nr *NodoRaft) empezarEleccion() {
 	nr.Mux.Lock()
 	nr.VotedFor = nr.Yo
